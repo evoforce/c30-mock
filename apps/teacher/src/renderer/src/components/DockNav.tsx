@@ -290,12 +290,11 @@ export default function DockNav({
   );
 }
 
-function IconCourseware() {
+function IconResource() {
   return (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M4 4a2 2 0 012-2h9l5 5v13a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" strokeLinejoin="round" />
-      <path d="M15 2v5h5" strokeLinejoin="round" />
-      <path d="M8 13h8M8 17h5" strokeLinecap="round" />
+      <path d="M3 7a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" strokeLinejoin="round" />
+      <path d="M3 7l9 6 9-6" strokeLinejoin="round" />
     </svg>
   );
 }

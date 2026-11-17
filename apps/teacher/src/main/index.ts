@@ -23,6 +23,15 @@ function createWindow(): void {
     mainWindow?.show();
   });
 
+  // 临时:转发 renderer 的 console 到终端,便于排查白屏
+  mainWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    const levels = ['LOG', 'WARN', 'ERROR', 'INFO', 'DEBUG', 'VERBOSE'];
+    console.log(`[renderer:${levels[level] ?? level}] ${message} (${sourceId}:${line})`);
+  });
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[renderer] process gone:', JSON.stringify(details));
+  });
+
   // 最大化状态变化时通知渲染层,用于切换"最大化/还原"按钮图标
   mainWindow.on('maximize', () => {
     mainWindow?.webContents.send('window:maximized', true);
