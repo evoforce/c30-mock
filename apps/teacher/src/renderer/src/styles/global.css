@@ -1,0 +1,24 @@
+/* C30 全局样式:仅补充 normalize.css 未覆盖、且自绘 UI 必需的部分 */
+
+/* 应用容器撑满窗口(无边框窗口) */
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #1f2937;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+/* 全局统一盒模型(避免 padding 撑破布局) */
+* {
+  box-sizing: border-box;
+}
