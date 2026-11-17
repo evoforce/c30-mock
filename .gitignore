@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.turbo/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Native build (C++)
+apps/whiteboard-native/build/
+*.o
+*.so
+*.dylib
+*.dll
+
+# Electron
+apps/*/release/
+apps/*/out/
+
+# Database
+pgdata/
+minio-data/
+redis-data/

@@ -1,0 +1,138 @@
+# 白板功能设计(核心)
+
+> 白板是 Demo 的核心要点。本文定义工具能力、状态模型、数据协议与验收标准。
+> 完整版由 C++ 绘制核心(N-API)承载,Demo 版用 Canvas 实现同一套抽象接口,保证可替换。
+
+## 一、工具能力(必做)
+
+| 工具 | 说明 | Demo 范围 |
+|---|---|---|
+| **笔(Pen)** | 自由书写,支持笔类型切换 | 必做 |
+| **笔类型切换** | 毛笔 / 钢笔 / 铅笔 | 必做,三选一 |
+| **颜色切换** | 调色板选色 | 必做 |
+| **笔迹粗细** | 线宽调节 | 必做 |
+| **白板擦(Eraser)** | 擦除笔迹(首版降级:命中整笔删除) | 必做 |
+| **黑板擦大小** | 橡皮擦半径可调 | 必做 |
+| **移除笔迹(整笔删除)** | 点击/框选移除整条笔迹 | 必做 |
+| **撤回(Undo)** | 撤销上一步操作 | 必做 |
+| 清空 | 清空当前页 | 必做 |
+
+## 二、笔类型语义
+
+| 类型 | 渲染特征 | 参数 |
+|---|---|---|
+| 毛笔 Brush | 粗头、压力/速度敏感,有笔锋拖尾 | color, width(范围大) |
+| 钢笔 Pen | 细头、平滑曲线、粗细稳定 | color, width(较细) |
+| 铅笔 Pencil | 细头、略有颗粒感、颜色偏灰 | color, width(最细) |
+
+## 三、状态模型
+
+```
+ToolState {
+  activeTool: 'pen' | 'eraser' | 'select'
+  penType:    'brush' | 'pen' | 'pencil'
+  color:      string          // 当前颜色
+  strokeWidth: number         // 笔迹粗细
+  eraserRadius: number        // 黑板擦大小
+}
+```
+
+```
+Stroke {
+  id: string        // uuid
+  tool: 'brush' | 'pen' | 'pencil'
+  color: string
+  width: number
+  opacity: number
+  points: { x, y, t }[]   // 采样点,含时间戳
+  seq: number       // 全局递增,保证有序
+}
+```
+
+## 四、擦除语义(核心难点)
+
+白板擦与"移除笔迹"是两种不同的删除语义,必须区分:
+
+1. **白板擦(Eraser)** —— 局部擦除
+   - 以橡皮擦半径命中笔迹采样点,做**几何裁剪**(把命中的 segment 打断/移除)。
+   - 结果可能把一条笔迹拆成多条,不整笔删除。
+   - 用于"擦掉一部分字迹"的直觉体验。
+
+2. **移除笔迹(整笔删除)** —— 对象级删除
+   - `select` 工具点击命中某条笔迹,整条删除。
+   - 适合误画后整体移除。
+
+> Demo 简化策略(已确认):白板擦首版采用"命中即整笔删除"降级实现,
+> 与 `select` 整笔移除走同一条 `stroke.remove` 协议;
+> 几何裁剪(局部擦除)作为后续升级,接口预留 `erase segments`。
+
+## 五、撤回(Undo)设计
+
+- **操作栈**:维护 undo 栈,入栈单位是"一次操作",不是"一个点"。
+  - 一笔从 `pointerdown` 到 `pointerup` 记为一次操作。
+  - 一次整笔移除记为一次操作。
+  - 一次清空记为一次操作(记录被清空的所有 stroke,支持 redo)。
+- **redo 栈**:undo 时把操作压入 redo 栈,支持重做。
+- **同步语义**:undo 以操作 id 广播给所有端,学生端本地执行同一操作(幂等)。
+  - 广播载荷:`{ op: 'undo', targetOpId }`,而非重复下发整页状态。
+- **容量上限**:Demo 阶段 undo 栈上限 100,超出丢弃最旧。
+
+## 六、数据协议(WebSocket 增量)
+
+| 事件 | 载荷 | 说明 |
+|---|---|---|
+| `stroke.append` | Stroke(含 seq) | 教师新增一笔 |
+| `stroke.remove` | { strokeIds: string[] } | 整笔删除 |
+| `stroke.erase` | { strokeId, erasedSegments } | 局部擦除(几何裁剪结果) |
+| `stroke.clear` | { pageNo } | 清空当前页 |
+| `undo.push` | { opId, payload } | 一次操作入栈并广播 |
+| `undo.pop` | { opId } | 撤销,广播目标操作 |
+| `tool.change` | ToolState 摘要 | 教师当前工具/颜色/粗细/擦除大小(可选,学生端展示) |
+
+> 学生端只接收并渲染,不主动产生 stroke(教师端是生产者)。
+
+## 七、渲染层抽象(保证 C++ 可替换)
+
+```
+interface Renderer {
+  render(strokes: Stroke[]): void
+  renderIncremental(stroke: Stroke): void   // 增量,仅重绘新笔画
+  remove(strokeIds: string[]): void
+  erase(strokeId, segments): void
+  clear(): void
+}
+```
+
+- Demo 版:`CanvasRenderer`(Canvas 2D)。
+- 完整版:`NativeRenderer`(C++ addon),实现同一接口。
+- 关键:笔画渲染按笔类型分组(铅笔最细、钢笔中等、毛笔最粗且压力敏感),增量只重绘脏区域,避免全量重绘。
+
+## 八、验收标准(白板部分)
+
+**P0(必须)**
+1. 可切换笔类型(毛笔 / 钢笔 / 铅笔),视觉区分明显
+2. 可切换颜色,调色板 ≥ 6 色
+3. 可调笔迹粗细
+4. 白板擦可擦除笔迹(命中整笔删除)
+5. 黑板擦大小可调,擦除半径随设置变化
+6. 可撤回上一步(undo)
+7. 上述操作经 WebSocket 实时同步到学生端
+
+**P1(尽量)**
+8. 整笔移除(select 点击删除)
+9. 清空白板并同步
+10. redo 重做
+
+**P2(加分)**
+11. 毛笔压力/速度敏感笔锋效果
+12. 白板擦局部几何裁剪(非整笔删除)
+13. 铅笔颗粒质感
+
+## 九、风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| 擦除几何裁剪复杂,1 天难完成 | 首版降级为"命中整笔删除",接口预留 erase segments |
+| 增量同步乱序 | stroke 带 seq,接收端按 seq 排序渲染 |
+| 毛笔压力/速度敏感难实现 | Demo 用固定宽度模拟,压感作为 P2 加分项 |
+| undo 同步一致性 | 以 opId 为幂等键,重复广播不重复执行 |

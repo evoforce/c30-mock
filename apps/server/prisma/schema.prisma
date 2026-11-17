@@ -1,0 +1,75 @@
+// C30 数据模型
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  TEACHER
+  STUDENT
+}
+
+enum SessionStatus {
+  ACTIVE
+  ENDED
+}
+
+model User {
+  id           String  @id @default(uuid())
+  username     String  @unique
+  passwordHash String
+  name         String
+  role         Role
+  createdAt    DateTime @default(now())
+
+  coursewares    Courseware[]
+  sessions       Session[]       @relation("TeacherSessions")
+  sessionStudents SessionStudent[]
+}
+
+model Courseware {
+  id        String   @id @default(uuid())
+  teacherId String
+  teacher   User     @relation(fields: [teacherId], references: [id])
+  title     String
+  fileKey   String
+  pageCount Int
+  createdAt DateTime @default(now())
+}
+
+model Session {
+  id        String        @id @default(uuid())
+  teacherId String
+  teacher   User          @relation("TeacherSessions", fields: [teacherId], references: [id])
+  roomCode  String        @unique
+  status    SessionStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  expiresAt DateTime?
+
+  students SessionStudent[]
+}
+
+model SessionStudent {
+  sessionId String
+  studentId String
+  session   Session @relation(fields: [sessionId], references: [id])
+  student   User    @relation(fields: [studentId], references: [id])
+  joinedAt  DateTime @default(now())
+
+  @@id([sessionId, studentId])
+}
+
+model WhiteboardStroke {
+  id        String   @id @default(uuid())
+  sessionId String
+  pageNo    Int
+  points    Json
+  color     String
+  width     Float
+  seq       Int
+  createdAt DateTime @default(now())
+}

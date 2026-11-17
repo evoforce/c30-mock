@@ -1,0 +1,15 @@
+{
+  "name": "@c30/whiteboard-native",
+  "version": "0.1.0",
+  "private": true,
+  "description": "C30 白板核心 C++ addon(N-API)",
+  "main": "build/Release/whiteboard_native.node",
+  "scripts": {
+    "build": "cmake-js compile",
+    "rebuild": "cmake-js rebuild"
+  },
+  "devDependencies": {
+    "cmake-js": "^7.3.0",
+    "node-addon-api": "^8.2.0"
+  }
+}
