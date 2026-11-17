@@ -21,6 +21,14 @@ const api = {
     publish: (info: { roomCode: string; teacherName: string; host: string; port: number }) =>
       ipcRenderer.invoke('session:publish', info),
   },
+  annotate: {
+    // 显示/隐藏桌面批注窗口
+    toggle: () => ipcRenderer.invoke('annotate:toggle'),
+    // 切换鼠标穿透模式(annotating=true 捕获鼠标可画, false 穿透到桌面)
+    setMode: (annotating: boolean) => ipcRenderer.invoke('annotate:set-mode', annotating),
+    // 关闭桌面批注窗口
+    close: () => ipcRenderer.invoke('annotate:close'),
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron';
+import { app, shell, BrowserWindow, ipcMain, screen } from 'electron';
 import { join } from 'path';
 import { networkInterfaces } from 'os';
 import { mdsd } from '@c30/mdsd';
@@ -6,6 +6,8 @@ import { createLocalSessionServer, type LocalSessionServer } from './localSessio
 
 let mainWindow: BrowserWindow | null = null;
 let localServer: LocalSessionServer | null = null;
+// 桌面批注窗口:全屏透明置顶,画笔覆盖在桌面任意界面之上
+let annotateWindow: BrowserWindow | null = null;
 
 // 获取本机局域网 IPv4 地址
 function getLanIP(): string {
@@ -69,6 +71,76 @@ function createWindow(): void {
   }
 }
 
+// 桌面批注窗口:全屏透明置顶,可穿透鼠标到桌面
+function createAnnotateWindow(): void {
+  const { width, height } = screen.getPrimaryDisplay().bounds;
+  annotateWindow = new BrowserWindow({
+    x: 0,
+    y: 0,
+    width,
+    height,
+    frame: false,
+    transparent: true, // 透明背景,桌面内容透出
+    alwaysOnTop: true, // 置顶,覆盖在任意窗口之上
+    skipTaskbar: true, // 不占任务栏
+    resizable: false,
+    movable: false,
+    hasShadow: false,
+    focusable: true,
+    fullscreenable: false,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+    },
+  });
+
+  // 关键:默认鼠标穿透,让桌面/下方窗口可正常点击;
+  // 进入批注模式时再关闭穿透(setIgnoreMouseEvents(false))。
+  annotateWindow.setIgnoreMouseEvents(true, { forward: true });
+  annotateWindow.setAlwaysOnTop(true, 'screen-saver');
+
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    annotateWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#/annotate`);
+  } else {
+    annotateWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: '/annotate' });
+  }
+
+  annotateWindow.on('closed', () => {
+    annotateWindow = null;
+  });
+}
+
+// 桌面批注 IPC 控制
+function registerAnnotateControls(): void {
+  // 显示/隐藏批注窗口
+  ipcMain.handle('annotate:toggle', () => {
+    if (!annotateWindow) {
+      createAnnotateWindow();
+    }
+    const visible = annotateWindow?.isVisible() ?? false;
+    if (visible) {
+      annotateWindow?.hide();
+    } else {
+      annotateWindow?.show();
+    }
+    return { visible: !visible };
+  });
+
+  // 切换鼠标穿透模式:annotating=true 时捕获鼠标(可画),false 时穿透到桌面
+  ipcMain.handle('annotate:set-mode', (_e, annotating: boolean) => {
+    if (!annotateWindow) return { ok: false };
+    // forward:true 让鼠标移动事件仍能透传给窗口(用于 hover 检测),但点击穿透
+    annotateWindow.setIgnoreMouseEvents(!annotating, { forward: true });
+    return { ok: true };
+  });
+
+  // 关闭批注窗口
+  ipcMain.handle('annotate:close', () => {
+    annotateWindow?.close();
+    return { ok: true };
+  });
+}
+
 // 窗口控制 IPC
 function registerWindowControls(): void {
   ipcMain.on('window:minimize', () => {
@@ -120,6 +192,7 @@ ipcMain.handle('session:publish', async (_e, info: { roomCode: string; teacherNa
 app.whenReady().then(() => {
   registerWindowControls();
   registerLocalSessionServer();
+  registerAnnotateControls();
   createWindow();
 
   app.on('activate', () => {
