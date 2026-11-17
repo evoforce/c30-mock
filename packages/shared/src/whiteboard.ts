@@ -90,3 +90,10 @@ export type WhiteboardEvent =
   | { type: 'undo.push'; payload: { opId: string; payload: unknown } }
   | { type: 'undo.pop'; payload: { opId: string } }
   | { type: 'tool.change'; payload: ToolState };
+
+// 白板全量状态快照(客户端连接/加入/切回时拉取)
+export interface WhiteboardSnapshot {
+  roomCode: string;
+  strokes: Stroke[];
+  nextSeq: number;
+}

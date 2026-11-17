@@ -70,7 +70,7 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
     return () => window.removeEventListener('resize', resize);
   }, []);
 
-  // 全量重绘
+  // 全量重绘(含正在绘制的笔画,保证实时显示)
   const redrawAll = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -81,6 +81,10 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
     ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
     for (const s of strokesRef.current) {
       renderStroke(ctx, s);
+    }
+    // 渲染正在绘制中的笔画(问题1:实时显示)
+    if (drawingRef.current) {
+      renderStroke(ctx, drawingRef.current);
     }
   }, []);
 
@@ -288,12 +292,24 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
     }
   };
 
-  // 接收远端事件(学生端)
+  // 接收远端事件(学生端) + 拉取全量快照(切回/后加入)
   useEffect(() => {
     if (!socket) return;
+
+    // 全量快照:覆盖本地状态(问题2/3:切回课堂、后加入学生拿到历史笔迹)
+    const onWbState = (snap: { roomCode: string; strokes: Stroke[]; nextSeq: number }) => {
+      strokesRef.current = [...snap.strokes];
+      seqRef.current = snap.nextSeq;
+      redrawAll();
+    };
+
     const onWbEvent = (event: WhiteboardEvent) => {
       if (event.type === 'stroke.append') {
-        strokesRef.current.push(event.payload);
+        // 去重:若已存在同 id 笔画则跳过(切回时可能既收到快照又收到增量)
+        const s = event.payload;
+        if (!strokesRef.current.some((x) => x.id === s.id)) {
+          strokesRef.current.push(s);
+        }
         redrawAll();
       } else if (event.type === 'stroke.remove') {
         const ids = event.payload.strokeIds;
@@ -303,13 +319,21 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
         strokesRef.current = [];
         redrawAll();
       }
-      // undo.pop 简化:学生端本地做一次 undo(同步体验)
     };
+
+    socket.on('whiteboard.state', onWbState);
     socket.on('whiteboard.event', onWbEvent);
+
+    // 挂载/切回时主动拉取全量快照
+    if (roomCode) {
+      socket.emit('whiteboard.state', { roomCode });
+    }
+
     return () => {
+      socket.off('whiteboard.state', onWbState);
       socket.off('whiteboard.event', onWbEvent);
     };
-  }, [socket, redrawAll]);
+  }, [socket, roomCode, redrawAll]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
