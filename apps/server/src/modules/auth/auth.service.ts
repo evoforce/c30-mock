@@ -1,40 +1,43 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { LoginRequest, LoginResponse, Role } from '@c30/shared';
+import { LoginRequest, LoginResponse } from '@c30/shared';
+import { PrismaService } from '../prisma/prisma.service';
+import { createHash } from 'crypto';
 
-interface MockUser {
-  id: string;
-  username: string;
-  password: string;
-  name: string;
-  role: Role;
+function hashPassword(pwd: string): string {
+  return createHash('sha256').update(pwd).digest('hex');
 }
-
-// Demo 阶段:Mock 种子账号(后续替换为 PostgreSQL 用户表)
-const MOCK_USERS: MockUser[] = [
-  { id: 'u-teacher-1', username: 'teacher', password: '123456', name: '王老师', role: 'TEACHER' },
-  { id: 'u-student-1', username: 'student', password: '123456', name: '小明', role: 'STUDENT' },
-];
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   async login(req: LoginRequest): Promise<LoginResponse> {
-    const user = MOCK_USERS.find(
-      (u) => u.username === req.username && u.password === req.password,
-    );
-    if (!user) {
+    const user = await this.prisma.user.findUnique({
+      where: { username: req.username },
+    });
+
+    if (!user || user.passwordHash !== hashPassword(req.password)) {
       throw new UnauthorizedException('用户名或密码错误');
     }
+
     const token = this.jwtService.sign({
       sub: user.id,
       username: user.username,
       role: user.role,
     });
+
     return {
       token,
-      user: { id: user.id, username: user.username, name: user.name, role: user.role },
+      user: {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+      },
     };
   }
 }

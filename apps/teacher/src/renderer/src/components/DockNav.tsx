@@ -8,7 +8,7 @@ interface DockItem {
 }
 
 const NAV_ITEMS: DockItem[] = [
-  { key: 'courseware', label: '课件', icon: <IconCourseware /> },
+  { key: 'resource', label: '资源库', icon: <IconResource /> },
   { key: 'whiteboard', label: '白板', icon: <IconWhiteboard /> },
   { key: 'session', label: '课堂', icon: <IconSession /> },
 ];

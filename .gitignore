@@ -40,3 +40,6 @@ apps/*/out/
 pgdata/
 minio-data/
 redis-data/
+
+# Local server storage (legacy)
+apps/server/storage/

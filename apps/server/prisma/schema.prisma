@@ -18,6 +18,12 @@ enum SessionStatus {
   ENDED
 }
 
+enum ResourceType {
+  COURSEWARE
+  MICROCOURSE
+  BOARD
+}
+
 model User {
   id           String  @id @default(uuid())
   username     String  @unique
@@ -26,19 +32,22 @@ model User {
   role         Role
   createdAt    DateTime @default(now())
 
-  coursewares    Courseware[]
-  sessions       Session[]       @relation("TeacherSessions")
-  sessionStudents SessionStudent[]
+  resources        Resource[]
+  sessions         Session[]       @relation("TeacherSessions")
+  sessionStudents  SessionStudent[]
 }
 
-model Courseware {
-  id        String   @id @default(uuid())
-  teacherId String
-  teacher   User     @relation(fields: [teacherId], references: [id])
+model Resource {
+  id        String       @id @default(uuid())
+  ownerId   String
+  owner     User         @relation(fields: [ownerId], references: [id])
+  type      ResourceType
   title     String
   fileKey   String
-  pageCount Int
-  createdAt DateTime @default(now())
+  fileSize  Int
+  mimeType  String
+  pageCount Int?
+  createdAt DateTime     @default(now())
 }
 
 model Session {
