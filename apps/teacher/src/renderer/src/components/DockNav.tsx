@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { User } from '@c30/shared';
 
 interface DockItem {
   key: string;
@@ -12,15 +13,21 @@ const NAV_ITEMS: DockItem[] = [
   { key: 'session', label: '课堂', icon: <IconSession /> },
 ];
 
-// 类 Dock 风格左侧导航:竖向圆润图标 + 悬浮标签,不带传统后台侧边栏的生硬感
+// 类 Dock 风格左侧导航:竖向圆润图标 + 悬浮标签;底部放用户信息与退出
 export default function DockNav({
   active,
   onChange,
+  user,
+  onLogout,
 }: {
   active: string;
   onChange: (key: string) => void;
+  user: User;
+  onLogout: () => void;
 }) {
   const [hover, setHover] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   return (
     <div
@@ -118,6 +125,167 @@ export default function DockNav({
           </div>
         );
       })}
+
+      {/* 底部用户信息 */}
+      <div style={{ marginTop: 'auto', paddingBottom: 16, position: 'relative' }}>
+        <div
+          title={user.name}
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: '50%',
+            background: 'linear-gradient(135deg, #3b82f6, #60a5fa)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#fff',
+            fontSize: 17,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          {user.name.charAt(0)}
+        </div>
+
+        {/* 弹出菜单 */}
+        {menuOpen && (
+          <>
+            <div
+              style={{
+                position: 'fixed',
+                inset: 0,
+                zIndex: 20,
+              }}
+              onClick={() => setMenuOpen(false)}
+            />
+            <div
+              style={{
+                position: 'absolute',
+                bottom: 60,
+                left: 8,
+                width: 160,
+                background: '#ffffff',
+                borderRadius: 10,
+                boxShadow: '0 8px 30px rgba(0,0,0,0.14)',
+                border: '1px solid #eef0f3',
+                padding: 6,
+                zIndex: 21,
+              }}
+            >
+              <div
+                style={{
+                  padding: '8px 10px 10px',
+                  borderBottom: '1px solid #f0f2f5',
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#1f2937' }}>
+                  {user.name}
+                </div>
+                <div style={{ fontSize: 11, color: '#9aa1ac', marginTop: 2 }}>
+                  {user.role === 'TEACHER' ? '教师账号' : '学生账号'}
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  setConfirmOpen(true);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '9px 10px',
+                  marginTop: 4,
+                  border: 'none',
+                  background: 'transparent',
+                  color: '#e5484d',
+                  fontSize: 13,
+                  textAlign: 'left',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = '#fef2f2';
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+                }}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                退出登录
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* 退出确认对话框 */}
+      {confirmOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.32)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 100,
+          }}
+          onClick={() => setConfirmOpen(false)}
+        >
+          <div
+            style={{
+              width: 320,
+              background: '#ffffff',
+              borderRadius: 14,
+              padding: 24,
+              boxShadow: '0 12px 40px rgba(0,0,0,0.2)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#1f2937' }}>
+              确认退出登录?
+            </div>
+            <p style={{ fontSize: 13, color: '#7c8494', margin: '10px 0 22px', lineHeight: 1.6 }}>
+              退出后需要重新登录才能继续使用。
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={() => setConfirmOpen(false)}
+                style={{
+                  padding: '8px 16px',
+                  border: '1px solid #e2e5ea',
+                  borderRadius: 8,
+                  background: '#fff',
+                  color: '#4b5563',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                }}
+              >
+                取消
+              </button>
+              <button
+                onClick={onLogout}
+                style={{
+                  padding: '8px 16px',
+                  border: 'none',
+                  borderRadius: 8,
+                  background: '#e5484d',
+                  color: '#fff',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                }}
+              >
+                退出
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
