@@ -82,14 +82,53 @@ export const PEN_DEFAULT_OPACITY: Record<PenType, number> = {
 
 // ---- WebSocket 协议 ----
 
+// 实时绘制增量(避免每次 move 全量重发整笔所有点,消除 O(n²) 序列化浪费)
+export interface LiveStrokeDelta {
+  id: string;            // 笔画 id
+  tool: PenType;
+  color: string;
+  width: number;
+  opacity: number;
+  // 本次新增的采样点(仅增量,不重复已发过的点)
+  delta: Point[];
+  // 是否结束(松笔/取消)
+  done: boolean;
+}
+
 export type WhiteboardEvent =
   | { type: 'stroke.append'; payload: Stroke }
+  // 实时绘制:教师端边画边同步,只发增量点,学生端本地累积(解决"松笔才显示" + 消除 O(n²))
+  | { type: 'stroke.live'; payload: LiveStrokeDelta }
   | { type: 'stroke.remove'; payload: { strokeIds: string[] } }
   | { type: 'stroke.erase'; payload: { strokeId: string; erasedSegments: unknown[] } }
   | { type: 'stroke.clear'; payload: { pageNo: number } }
-  | { type: 'undo.push'; payload: { opId: string; payload: unknown } }
-  | { type: 'undo.pop'; payload: { opId: string } }
+  // 撤销/重做:广播具体笔画变更(学生端复用 append/remove 语义,无需本地 undo 栈)
+  | { type: 'undo'; payload: { removedStrokeIds: string[]; restoredStrokes: Stroke[] } }
   | { type: 'tool.change'; payload: ToolState };
+
+// ---- 弹幕 / 互动 ----
+
+export interface Danmaku {
+  id: string;
+  userId: string;
+  name: string;
+  content: string;
+  ts: number;
+}
+
+// 课堂互动控制(教师端可开/关)
+export interface InteractionControl {
+  danmakuEnabled: boolean; // 是否允许发送弹幕
+  quizEnabled: boolean;    // 是否开放答题
+}
+
+export type InteractionEvent =
+  // 学生发弹幕(客户端 → 服务端)
+  | { type: 'danmaku.send'; payload: { content: string } }
+  // 弹幕广播(服务端 → 客户端)
+  | { type: 'danmaku.push'; payload: Danmaku }
+  // 教师更新互动开关(客户端 → 服务端),服务端广播给全员
+  | { type: 'interaction.control'; payload: InteractionControl };
 
 // 白板全量状态快照(客户端连接/加入/切回时拉取)
 export interface WhiteboardSnapshot {

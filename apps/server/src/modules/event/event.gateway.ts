@@ -13,6 +13,8 @@ import type {
   SessionClientEvent,
   WhiteboardEvent,
   Stroke,
+  InteractionEvent,
+  InteractionControl,
 } from '@c30/shared';
 
 // 房间的完整状态
@@ -20,6 +22,7 @@ interface RoomState {
   members: SessionMember[];
   strokes: Stroke[];   // 白板笔画(全量,持久到课堂结束)
   nextSeq: number;     // 全局递增序列号
+  interaction: InteractionControl; // 课堂互动开关(弹幕/答题)
 }
 
 /**
@@ -84,6 +87,7 @@ export class EventGateway implements OnGatewayConnection, OnGatewayDisconnect {
       members: [member],
       strokes: [],
       nextSeq: 0,
+      interaction: { danmakuEnabled: true, quizEnabled: true },
     });
     this.socketIndex.set(client.id, { roomCode, userId: teacherId });
 
@@ -91,6 +95,11 @@ export class EventGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.emit('session.joined', { sessionId: roomCode, roomCode, members: [member] });
     // 返回初始空快照
     client.emit('whiteboard.state', { roomCode, strokes: [], nextSeq: 0 });
+    // 下发当前互动开关
+    client.emit('interaction.control', {
+      roomCode,
+      control: { danmakuEnabled: true, quizEnabled: true },
+    });
     return { ok: true, roomCode };
   }
 
@@ -130,6 +139,8 @@ export class EventGateway implements OnGatewayConnection, OnGatewayDisconnect {
       strokes: room.strokes,
       nextSeq: room.nextSeq,
     });
+    // 后加入者同步当前互动开关
+    client.emit('interaction.control', { roomCode, control: room.interaction });
     // 广播给其他成员(含教师)
     client.to(roomCode).emit('session.memberJoin', { member });
     return { ok: true, roomCode, members: room.members };
@@ -152,15 +163,74 @@ export class EventGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // 服务端重分配 seq,保证全局有序且不重复
       stroke.seq = ++room.nextSeq;
       room.strokes.push(stroke);
+    } else if (event.type === 'stroke.live') {
+      // 实时绘制流:不落库(仅转发),学生端流式渲染;松笔后 stroke.append 才持久化
     } else if (event.type === 'stroke.remove') {
       const ids = new Set(event.payload.strokeIds);
       room.strokes = room.strokes.filter((s) => !ids.has(s.id));
+    } else if (event.type === 'undo') {
+      // 撤销/重做:同步权威状态(removed + restored)
+      const { removedStrokeIds, restoredStrokes } = event.payload;
+      if (removedStrokeIds.length > 0) {
+        const ids = new Set(removedStrokeIds);
+        room.strokes = room.strokes.filter((s) => !ids.has(s.id));
+      }
+      if (restoredStrokes.length > 0) {
+        const existing = new Set(room.strokes.map((s) => s.id));
+        for (const s of restoredStrokes) {
+          if (!existing.has(s.id)) room.strokes.push(s);
+        }
+      }
     } else if (event.type === 'stroke.clear') {
       room.strokes = [];
     }
 
     // 转发给房间内除发送者外的所有端(学生端)
     client.to(roomCode).emit('whiteboard.event', event);
+    return { ok: true };
+  }
+
+  // ---- 弹幕 ----
+
+  @SubscribeMessage('danmaku.send')
+  handleDanmaku(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { roomCode: string; content: string },
+  ) {
+    const room = this.rooms.get(body.roomCode);
+    if (!room) return { ok: false };
+    // 教师可关闭弹幕:关闭时静默丢弃
+    if (!room.interaction.danmakuEnabled) return { ok: false, disabled: true };
+
+    const idx = this.socketIndex.get(client.id);
+    const member = room.members.find((m) => m.userId === idx?.userId);
+    const danmaku = {
+      id: crypto.randomUUID(),
+      userId: idx?.userId ?? 'unknown',
+      name: member?.name ?? '匿名',
+      content: body.content,
+      ts: Date.now(),
+    };
+    // 广播给房间内所有端(含发送者,统一渲染)
+    this.server.to(body.roomCode).emit('danmaku.push', danmaku);
+    return { ok: true };
+  }
+
+  // ---- 互动控制(教师端开/关弹幕、答题) ----
+
+  @SubscribeMessage('interaction.control')
+  handleInteractionControl(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { roomCode: string; control: InteractionControl },
+  ) {
+    const room = this.rooms.get(body.roomCode);
+    if (!room) return { ok: false };
+    room.interaction = { ...room.interaction, ...body.control };
+    // 广播给全员(含教师自己,保持状态一致)
+    this.server.to(body.roomCode).emit('interaction.control', {
+      roomCode: body.roomCode,
+      control: room.interaction,
+    });
     return { ok: true };
   }
 
