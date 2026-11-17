@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { User, SessionMember } from '@c30/shared';
 import { io, type Socket } from 'socket.io-client';
-import DockNav from './DockNav';
+import FloatingDock, { TopStatusBar, BottomToolbar } from './FloatingDock';
 import ResourceLibrary from './ResourceLibrary';
 import Whiteboard from './Whiteboard';
 
@@ -15,7 +15,8 @@ export default function TeacherWorkspace({
   user: User;
   onLogout: () => void;
 }) {
-  const [active, setActive] = useState('resource');
+  const [active, setActive] = useState('courseware');
+  const [activeTool, setActiveTool] = useState('pen');
   const [socket, setSocket] = useState<Socket | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [members, setMembers] = useState<SessionMember[]>([]);
@@ -104,7 +105,7 @@ export default function TeacherWorkspace({
 
   // 进入白板 tab 时自动创建课堂
   useEffect(() => {
-    if (active === 'whiteboard' || active === 'session') {
+    if (active === 'whiteboard' || active === 'class') {
       if (!socketRef.current) {
         connectSocket();
       }
@@ -119,57 +120,91 @@ export default function TeacherWorkspace({
   }, [active, roomCode, createSession]);
 
   return (
-    <div style={{ display: 'flex', height: '100vh' }}>
-      <DockNav active={active} onChange={setActive} user={user} onLogout={onLogout} />
+    <div style={{ display: 'flex', height: '100vh', background: '#f7f8fa' }}>
+      {/* 左侧黑色悬浮导航(C30 形态) */}
+      <FloatingDock
+        role="TEACHER"
+        active={active}
+        onChange={setActive}
+        user={user}
+        onLogout={onLogout}
+        memberCount={members.length}
+        networkStatus="direct"
+      />
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {/* 顶部标题条 */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+        {/* 顶部:标题 + 右上角状态(网络/班级/人数) */}
         <div
           style={{
-            height: 52,
+            height: 48,
             display: 'flex',
             alignItems: 'center',
-            padding: '0 24px',
+            padding: '0 16px',
             borderBottom: '1px solid #eef0f3',
             background: '#ffffff',
             gap: 12,
           }}
         >
-          <div style={{ fontSize: 16, fontWeight: 600, color: '#1f2937' }}>
-            {active === 'resource' && '资源库'}
+          <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937' }}>
+            {active === 'class' && '上课'}
             {active === 'whiteboard' && '白板'}
-            {active === 'session' && '课堂'}
+            {active === 'textbook' && '课本'}
+            {active === 'courseware' && '课件'}
+            {active === 'comment' && '讲评'}
           </div>
-          {roomCode && (active === 'whiteboard' || active === 'session') && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span
-                style={{
-                  fontSize: 12,
-                  color: '#2563eb',
-                  background: '#eaf1ff',
-                  padding: '3px 10px',
-                  borderRadius: 12,
-                  fontWeight: 600,
-                }}
-              >
-                课堂码 {roomCode}
-              </span>
-              <span style={{ fontSize: 12, color: '#9aa1ac' }}>{members.length} 人在线</span>
-            </div>
-          )}
+          <button
+            onClick={() => (window as any).api?.annotate?.toggle?.()}
+            style={{
+              padding: '5px 12px',
+              borderRadius: 8,
+              border: '1px solid #dbeafe',
+              background: '#eff6ff',
+              color: '#2563eb',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+            }}
+            title="在桌面上直接书写批注"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            桌面批注
+          </button>
+          <div style={{ marginLeft: 'auto' }}>
+            <TopStatusBar networkStatus="direct" memberCount={members.length} />
+          </div>
         </div>
 
         {/* 内容区 */}
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          {active === 'resource' && <ResourceLibrary userId={user.id} />}
+          {active === 'courseware' && <ResourceLibrary userId={user.id} />}
           {active === 'whiteboard' && (
             <Whiteboard socket={socket} roomCode={roomCode} isTeacher />
           )}
-          {active === 'session' && (
+          {active === 'class' && (
             <SessionPanel roomCode={roomCode} members={members} />
           )}
+          {(active === 'textbook' || active === 'comment') && (
+            <Placeholder title={active === 'textbook' ? '课本' : '讲评'} />
+          )}
         </div>
+
+        {/* 底部悬浮工具条(选择/画笔/板擦/互动/聚焦/更多) */}
+        <BottomToolbar activeTool={activeTool} onToolChange={setActiveTool} />
       </div>
+    </div>
+  );
+}
+
+// 占位面板(课本/讲评等未实现模块)
+function Placeholder({ title }: { title: string }) {
+  return (
+    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9aa1ac', fontSize: 14 }}>
+      {title}模块开发中
     </div>
   );
 }

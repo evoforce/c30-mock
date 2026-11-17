@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { User, SessionMember } from '@c30/shared';
 import { io, type Socket } from 'socket.io-client';
-import DockNav from './DockNav';
+import FloatingDock, { TopStatusBar } from './FloatingDock';
 import Whiteboard from './Whiteboard';
 
 const SOCKET_URL = 'http://127.0.0.1:3000';
@@ -21,7 +21,7 @@ export default function StudentWorkspace({
   user: User;
   onLogout: () => void;
 }) {
-  const [active, setActive] = useState('session');
+  const [active, setActive] = useState('class');
   const [socket, setSocket] = useState<Socket | null>(null);
   const [joined, setJoined] = useState(false);
   const [roomCode, setRoomCode] = useState('');
@@ -114,29 +114,37 @@ export default function StudentWorkspace({
 
   // 进入课堂/白板 tab 时确保 socket 连接
   useEffect(() => {
-    if (active === 'session' || active === 'whiteboard') {
+    if (active === 'class' || active === 'whiteboard') {
       if (!socketRef.current) connectSocket();
     }
   }, [active, connectSocket]);
 
   return (
-    <div style={{ display: 'flex', height: '100vh' }}>
-      <DockNav active={active} onChange={setActive} user={user} onLogout={onLogout} />
+    <div style={{ display: 'flex', height: '100vh', background: '#f7f8fa' }}>
+      <FloatingDock
+        role="STUDENT"
+        active={active}
+        onChange={setActive}
+        user={user}
+        onLogout={onLogout}
+        memberCount={members.length}
+        networkStatus={connMode}
+      />
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
         <div
           style={{
-            height: 52,
+            height: 48,
             display: 'flex',
             alignItems: 'center',
-            padding: '0 24px',
+            padding: '0 16px',
             borderBottom: '1px solid #eef0f3',
             background: '#ffffff',
             gap: 12,
           }}
         >
-          <div style={{ fontSize: 16, fontWeight: 600, color: '#1f2937' }}>
-            {active === 'session' && '课堂'}
+          <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937' }}>
+            {active === 'class' && '上课'}
             {active === 'courseware' && '课件'}
             {active === 'whiteboard' && '白板'}
           </div>
@@ -154,23 +162,13 @@ export default function StudentWorkspace({
               已加入课堂 {roomCode} · {members.length} 人在线
             </span>
           )}
-          {joined && connMode && (
-            <span
-              style={{
-                fontSize: 11,
-                color: connMode === 'direct' ? '#2563eb' : '#9aa1ac',
-                background: connMode === 'direct' ? '#eaf1ff' : '#f4f6fa',
-                padding: '2px 8px',
-                borderRadius: 8,
-              }}
-            >
-              {connMode === 'direct' ? '局域网直连' : '服务器中继'}
-            </span>
-          )}
+          <div style={{ marginLeft: 'auto' }}>
+            <TopStatusBar networkStatus={connMode} memberCount={members.length} />
+          </div>
         </div>
 
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          {active === 'session' && (
+          {active === 'class' && (
             !joined ? (
               <JoinPanel
                 inputCode={inputCode}
@@ -199,9 +197,9 @@ export default function StudentWorkspace({
                   gap: 12,
                 }}
               >
-                <div>请先在「课堂」中通过课堂码加入</div>
+                <div>请先在「上课」中通过课堂码加入</div>
                 <button
-                  onClick={() => setActive('session')}
+                  onClick={() => setActive('class')}
                   style={{
                     padding: '8px 16px',
                     border: 'none',
