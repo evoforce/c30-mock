@@ -6,6 +6,13 @@ import Whiteboard from './Whiteboard';
 
 const SOCKET_URL = 'http://127.0.0.1:3000';
 
+interface TeacherEndpoint {
+  roomCode: string;
+  teacherName: string;
+  host: string;
+  port: number;
+}
+
 // 学生端主界面:类 Dock 左侧导航 + 右侧内容区
 export default function StudentWorkspace({
   user,
@@ -22,13 +29,59 @@ export default function StudentWorkspace({
   const [error, setError] = useState('');
   const [members, setMembers] = useState<SessionMember[]>([]);
   const socketRef = useRef<Socket | null>(null);
+  // 局域网发现的教师端(双轨连接:优先直连,回退中心服务器)
+  const teacherEndpointRef = useRef<TeacherEndpoint | null>(null);
+  const [connMode, setConnMode] = useState<'direct' | 'relay' | ''>('');
+
+  // 订阅局域网发现结果(主进程 mDNS → IPC → renderer)
+  useEffect(() => {
+    const api = (window as any).api?.discovery;
+    if (!api) return;
+    // 拉取已发现的结果
+    api.getTeacher?.().then((info: TeacherEndpoint | null) => {
+      if (info) teacherEndpointRef.current = info;
+    });
+    // 订阅后续发现
+    const off = api.onFound?.((info: TeacherEndpoint) => {
+      teacherEndpointRef.current = info;
+    });
+    return off;
+  }, []);
 
   const connectSocket = useCallback(() => {
     if (socketRef.current) return socketRef.current;
-    const s = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
+
+    // 双轨:优先直连教师端内嵌 server,失败回退中心服务器
+    const endpoint = teacherEndpointRef.current;
+    const targetUrl =
+      endpoint && endpoint.host && endpoint.port
+        ? `http://${endpoint.host}:${endpoint.port}`
+        : SOCKET_URL;
+
+    const s = io(targetUrl, { transports: ['websocket', 'polling'] });
+
+    // 若直连失败且还有回退余地,自动切换中心服务器
+    s.on('connect_error', () => {
+      if (targetUrl !== SOCKET_URL && !s.connected) {
+        console.log(`[conn] 直连 ${targetUrl} 失败,回退中心服务器`);
+        socketRef.current = null;
+        setConnMode('relay');
+        const fallback = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
+        socketRef.current = fallback;
+        setSocket(fallback);
+        bindEvents(fallback);
+      }
+    });
+
     socketRef.current = s;
     setSocket(s);
+    setConnMode(targetUrl === SOCKET_URL ? 'relay' : 'direct');
+    bindEvents(s);
+    return s;
+  }, []);
 
+  // 统一事件绑定
+  const bindEvents = useCallback((s: Socket) => {
     s.on('session.joined', (d: { roomCode: string; members: SessionMember[] }) => {
       setRoomCode(d.roomCode);
       setMembers(d.members);
@@ -45,7 +98,6 @@ export default function StudentWorkspace({
       setError(d.message);
       setJoined(false);
     });
-    return s;
   }, []);
 
   const joinSession = useCallback(() => {
@@ -100,6 +152,19 @@ export default function StudentWorkspace({
               }}
             >
               已加入课堂 {roomCode} · {members.length} 人在线
+            </span>
+          )}
+          {joined && connMode && (
+            <span
+              style={{
+                fontSize: 11,
+                color: connMode === 'direct' ? '#2563eb' : '#9aa1ac',
+                background: connMode === 'direct' ? '#eaf1ff' : '#f4f6fa',
+                padding: '2px 8px',
+                borderRadius: 8,
+              }}
+            >
+              {connMode === 'direct' ? '局域网直连' : '服务器中继'}
             </span>
           )}
         </div>

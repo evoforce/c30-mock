@@ -20,29 +20,81 @@ export default function TeacherWorkspace({
   const [roomCode, setRoomCode] = useState('');
   const [members, setMembers] = useState<SessionMember[]>([]);
   const socketRef = useRef<Socket | null>(null);
+  // 内嵌课堂服务器端点(教师端自己也是局域网直连)
+  const localEndpointRef = useRef<{ host: string; port: number } | null>(null);
 
-  // 建立 socket 连接(进入白板/课堂 tab 时)
+  // 启动时获取内嵌服务器端点
+  useEffect(() => {
+    const sessionApi = (window as any).api?.session;
+    sessionApi?.getLocalEndpoint?.().then((ep: { host: string; port: number } | null) => {
+      if (ep?.port) localEndpointRef.current = ep;
+    });
+  }, []);
+
+  // 广播课堂信息到局域网(mDNS),供学生端直连
+  const publishToLan = useCallback(
+    async (code: string) => {
+      const sessionApi = (window as any).api?.session;
+      if (!sessionApi) return;
+      const endpoint = await sessionApi.getLocalEndpoint?.();
+      if (!endpoint?.port) return; // 内嵌服务器未就绪,跳过(回退中心服务器)
+      await sessionApi.publish?.({
+        roomCode: code,
+        teacherName: user.name,
+        host: endpoint.host,
+        port: endpoint.port,
+      });
+    },
+    [user],
+  );
+
+  const bindEvents = useCallback(
+    (s: Socket) => {
+      s.on('session.created', (d: { roomCode: string }) => {
+        setRoomCode(d.roomCode);
+        publishToLan(d.roomCode);
+      });
+      s.on('session.joined', (d: { roomCode: string; members: SessionMember[] }) => {
+        setRoomCode(d.roomCode);
+        setMembers(d.members);
+      });
+      s.on('session.memberJoin', (d: { member: SessionMember }) => {
+        setMembers((prev) => (prev.some((m) => m.userId === d.member.userId) ? prev : [...prev, d.member]));
+      });
+      s.on('session.memberLeave', (d: { userId: string }) => {
+        setMembers((prev) => prev.filter((m) => m.userId !== d.userId));
+      });
+    },
+    [publishToLan],
+  );
+
+  // 建立 socket 连接(优先内嵌服务器,失败回退中心服务器)
   const connectSocket = useCallback(() => {
     if (socketRef.current) return socketRef.current;
-    const s = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
+
+    const endpoint = localEndpointRef.current;
+    const targetUrl =
+      endpoint && endpoint.port ? `http://127.0.0.1:${endpoint.port}` : SOCKET_URL;
+
+    const s = io(targetUrl, { transports: ['websocket', 'polling'] });
+
+    // 内嵌服务器连不上 → 回退中心服务器
+    s.on('connect_error', () => {
+      if (targetUrl !== SOCKET_URL && !s.connected) {
+        console.log(`[conn] 内嵌服务器 ${targetUrl} 不可用,回退中心服务器`);
+        socketRef.current = null;
+        const fallback = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
+        socketRef.current = fallback;
+        setSocket(fallback);
+        bindEvents(fallback);
+      }
+    });
+
     socketRef.current = s;
     setSocket(s);
-
-    s.on('session.created', (d: { roomCode: string }) => {
-      setRoomCode(d.roomCode);
-    });
-    s.on('session.joined', (d: { roomCode: string; members: SessionMember[] }) => {
-      setRoomCode(d.roomCode);
-      setMembers(d.members);
-    });
-    s.on('session.memberJoin', (d: { member: SessionMember }) => {
-      setMembers((prev) => (prev.some((m) => m.userId === d.member.userId) ? prev : [...prev, d.member]));
-    });
-    s.on('session.memberLeave', (d: { userId: string }) => {
-      setMembers((prev) => prev.filter((m) => m.userId !== d.userId));
-    });
+    bindEvents(s);
     return s;
-  }, []);
+  }, [bindEvents]);
 
   // 教师创建课堂
   const createSession = useCallback(() => {

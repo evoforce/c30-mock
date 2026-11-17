@@ -14,6 +14,13 @@ const api = {
       return () => ipcRenderer.removeListener('window:maximized', listener);
     },
   },
+  session: {
+    // 获取内嵌课堂服务器端点(host:port)
+    getLocalEndpoint: () => ipcRenderer.invoke('session:local-endpoint'),
+    // 广播课堂信息到局域网(mDNS)
+    publish: (info: { roomCode: string; teacherName: string; host: string; port: number }) =>
+      ipcRenderer.invoke('session:publish', info),
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

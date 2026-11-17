@@ -1,7 +1,11 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'path';
+import { mdsd, type DiscoveryInfo } from '@c30/mdsd';
 
 let mainWindow: BrowserWindow | null = null;
+
+// 局域网教师端发现结果(供 renderer 双轨连接)
+let discoveredTeacher: DiscoveryInfo | null = null;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -62,8 +66,26 @@ function registerWindowControls(): void {
   });
 }
 
+// 局域网发现:订阅教师端 mDNS 广播,供双轨连接
+function registerDiscovery(): void {
+  ipcMain.handle('discovery:get-teacher', () => {
+    return discoveredTeacher;
+  });
+
+  mdsd
+    .subscribe((info) => {
+      discoveredTeacher = info;
+      console.log(`[discovery] 发现教师端: ${info.teacherName} @ ${info.host}:${info.port} (${info.roomCode})`);
+      mainWindow?.webContents.send('discovery:found', info);
+    })
+    .catch((err) => {
+      console.warn('[discovery] mDNS 订阅失败(将回退中心服务器):', (err as Error)?.message ?? String(err));
+    });
+}
+
 app.whenReady().then(() => {
   registerWindowControls();
+  registerDiscovery();
   createWindow();
 
   app.on('activate', () => {
