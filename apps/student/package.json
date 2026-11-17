@@ -5,7 +5,7 @@
   "description": "C30 学生端(Electron + vite)",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node ../../scripts/dev-electron.mjs",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "lint": "tsc --noEmit"
