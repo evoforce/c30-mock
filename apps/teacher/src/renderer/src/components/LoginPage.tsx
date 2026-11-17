@@ -60,100 +60,49 @@ export default function LoginPage({ role, onLogin }: LoginPageProps) {
   return (
     <div
       style={{
+        position: 'fixed',
+        inset: 0,
         display: 'flex',
-        height: '100vh',
-        background: '#f7f8fa',
+        alignItems: 'center',
+        justifyContent: 'center',
       }}
     >
-      {/* 左侧品牌区 */}
+      {/* 居中悬浮登录卡片 */}
       <div
         style={{
-          flex: '1 1 52%',
-          background: 'linear-gradient(135deg, #1e40af 0%, #2563eb 55%, #3b82f6 100%)',
-          color: '#fff',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-          padding: '0 64px',
-          position: 'relative',
-          overflow: 'hidden',
+          width: 400,
+          background: 'rgba(255,255,255,0.96)',
+          borderRadius: 16,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
+          padding: '40px 36px',
+          backdropFilter: 'blur(12px)',
         }}
       >
-        {/* 装饰性教学元素 */}
-        <div
-          style={{
-            position: 'absolute',
-            top: -60,
-            right: -40,
-            width: 260,
-            height: 260,
-            borderRadius: '50%',
-            background: 'rgba(255,255,255,0.06)',
-          }}
-        />
-        <div
-          style={{
-            position: 'absolute',
-            bottom: -80,
-            left: -60,
-            width: 320,
-            height: 320,
-            borderRadius: '50%',
-            background: 'rgba(255,255,255,0.05)',
-          }}
-        />
-
-        <div style={{ position: 'relative', zIndex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 24 }}>
           <div
             style={{
-              display: 'inline-flex',
+              width: 40,
+              height: 40,
+              borderRadius: 10,
+              background: 'linear-gradient(135deg, #1e40af, #2563eb)',
+              color: '#fff',
+              display: 'flex',
               alignItems: 'center',
-              gap: 10,
-              marginBottom: 28,
+              justifyContent: 'center',
+              fontSize: 18,
+              fontWeight: 700,
             }}
           >
-            <LogoMark />
-            <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: 1 }}>
-              {cfg.brand}
-            </span>
+            C
           </div>
-
-          <h1 style={{ fontSize: 40, fontWeight: 700, margin: '0 0 16px', lineHeight: 1.2 }}>
-            {cfg.title}
-          </h1>
-          <p style={{ fontSize: 17, margin: 0, opacity: 0.9, lineHeight: 1.6 }}>
-            {cfg.subtitle}
-          </p>
-
-          <div style={{ marginTop: 40, display: 'flex', gap: 24, opacity: 0.85 }}>
-            {['课件同步', '白板互动', '局域网连接'].map((f) => (
-              <div key={f} style={{ fontSize: 14 }}>
-                <span style={{ marginRight: 6 }}>·</span>
-                {f}
-              </div>
-            ))}
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#1f2937' }}>{cfg.brand}</div>
+            <div style={{ fontSize: 12, color: '#9aa1ac' }}>{cfg.subtitle}</div>
           </div>
         </div>
-      </div>
 
-      {/* 右侧登录表单 */}
-      <div
-        style={{
-          flex: '1 1 48%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        <form onSubmit={handleSubmit} style={{ width: 360 }}>
-          <h2 style={{ fontSize: 26, margin: '0 0 8px', color: '#1f2937' }}>
-            欢迎回来
-          </h2>
-          <p style={{ color: '#8a8f98', fontSize: 14, margin: '0 0 36px' }}>
-            登录{cfg.title}开始
-          </p>
-
-          <label style={{ display: 'block', fontSize: 14, marginBottom: 8, color: '#4b5563' }}>
+        <form onSubmit={handleSubmit}>
+          <label style={{ display: 'block', fontSize: 13, marginBottom: 6, color: '#4b5563' }}>
             账号
           </label>
           <input
@@ -166,10 +115,10 @@ export default function LoginPage({ role, onLogin }: LoginPageProps) {
           <label
             style={{
               display: 'block',
-              fontSize: 14,
-              marginBottom: 8,
+              fontSize: 13,
+              marginBottom: 6,
               color: '#4b5563',
-              marginTop: 20,
+              marginTop: 16,
             }}
           >
             密码
@@ -191,13 +140,13 @@ export default function LoginPage({ role, onLogin }: LoginPageProps) {
             disabled={loading}
             style={{
               width: '100%',
-              marginTop: 32,
+              marginTop: 28,
               padding: '13px 0',
               background: cfg.accent,
               color: '#fff',
               border: 'none',
               borderRadius: 10,
-              fontSize: 16,
+              fontSize: 15,
               fontWeight: 500,
               cursor: loading ? 'not-allowed' : 'pointer',
               opacity: loading ? 0.7 : 1,
@@ -207,7 +156,7 @@ export default function LoginPage({ role, onLogin }: LoginPageProps) {
             {loading ? '登录中…' : '登 录'}
           </button>
 
-          <p style={{ color: '#b0b4bb', fontSize: 12, marginTop: 24, textAlign: 'center' }}>
+          <p style={{ color: '#b0b4bb', fontSize: 12, marginTop: 20, textAlign: 'center' }}>
             {cfg.hint}
           </p>
         </form>
@@ -216,30 +165,9 @@ export default function LoginPage({ role, onLogin }: LoginPageProps) {
   );
 }
 
-function LogoMark() {
-  return (
-    <svg width="34" height="34" viewBox="0 0 34 34" fill="none">
-      <rect x="1" y="1" width="32" height="32" rx="8" fill="rgba(255,255,255,0.15)" />
-      <path
-        d="M10 22 L17 10 L24 22"
-        stroke="#fff"
-        strokeWidth="2.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M13 18 L21 18"
-        stroke="#fff"
-        strokeWidth="2.4"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
 const inputStyle: React.CSSProperties = {
   width: '100%',
-  padding: '13px 14px',
+  padding: '12px 14px',
   border: '1px solid #e2e5ea',
   borderRadius: 10,
   fontSize: 15,

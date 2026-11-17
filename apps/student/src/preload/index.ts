@@ -24,6 +24,10 @@ const api = {
       return () => ipcRenderer.removeListener('discovery:found', listener);
     },
   },
+  pointer: {
+    // 切换鼠标穿透:interactive=true 捕获鼠标(悬浮组件可交互),false 穿透桌面
+    setInteractive: (interactive: boolean) => ipcRenderer.invoke('pointer:set-interactive', interactive),
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

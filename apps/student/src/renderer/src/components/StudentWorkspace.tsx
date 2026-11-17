@@ -120,117 +120,70 @@ export default function StudentWorkspace({
   }, [active, connectSocket]);
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: '#f7f8fa' }}>
-      <FloatingDock
-        role="STUDENT"
-        active={active}
-        onChange={setActive}
-        user={user}
-        onLogout={onLogout}
-        memberCount={members.length}
-        networkStatus={connMode}
-      />
+    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none' }}>
+      {/* 白板全屏透明(跟随教师) */}
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: active === 'whiteboard' ? 'auto' : 'none' }}>
+        {active === 'whiteboard' && (
+          joined ? (
+            <Whiteboard socket={socket} roomCode={roomCode} isTeacher={false} />
+          ) : (
+            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ background: 'rgba(255,255,255,0.9)', padding: '24px 32px', borderRadius: 12, textAlign: 'center', color: '#6b7280', fontSize: 14 }}>
+                请先通过「上课」加入课堂
+              </div>
+            </div>
+          )
+        )}
+      </div>
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+      {/* 课堂(加入/成员)居中悬浮面板 */}
+      {active === 'class' && (
+        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', pointerEvents: 'auto' }}>
+          {!joined ? (
+            <JoinPanel inputCode={inputCode} setInputCode={setInputCode} onJoin={joinSession} error={error} />
+          ) : (
+            <MemberPanel roomCode={roomCode} members={members} />
+          )}
+        </div>
+      )}
+
+      {/* 课件悬浮面板 */}
+      {active === 'courseware' && (
         <div
           style={{
-            height: 48,
-            display: 'flex',
-            alignItems: 'center',
-            padding: '0 16px',
-            borderBottom: '1px solid #eef0f3',
-            background: '#ffffff',
-            gap: 12,
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%,-50%)',
+            pointerEvents: 'auto',
+            background: '#fff',
+            borderRadius: 14,
+            padding: '32px 40px',
+            boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
+            color: '#9aa1ac',
+            fontSize: 14,
           }}
         >
-          <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937' }}>
-            {active === 'class' && '上课'}
-            {active === 'courseware' && '课件'}
-            {active === 'whiteboard' && '白板'}
-          </div>
-          {joined && roomCode && (
-            <span
-              style={{
-                fontSize: 12,
-                color: '#16a34a',
-                background: '#e8f7ee',
-                padding: '3px 10px',
-                borderRadius: 12,
-                fontWeight: 600,
-              }}
-            >
-              已加入课堂 {roomCode} · {members.length} 人在线
-            </span>
-          )}
-          <div style={{ marginLeft: 'auto' }}>
-            <TopStatusBar networkStatus={connMode} memberCount={members.length} />
-          </div>
+          课件跟随即将上线
         </div>
+      )}
 
-        <div style={{ flex: 1, overflow: 'hidden' }}>
-          {active === 'class' && (
-            !joined ? (
-              <JoinPanel
-                inputCode={inputCode}
-                setInputCode={setInputCode}
-                onJoin={joinSession}
-                error={error}
-              />
-            ) : (
-              <MemberPanel roomCode={roomCode} members={members} />
-            )
-          )}
-          {active === 'whiteboard' && (
-            joined ? (
-              <Whiteboard socket={socket} roomCode={roomCode} isTeacher={false} />
-            ) : (
-              <div
-                style={{
-                  height: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: '#f7f8fa',
-                  color: '#9aa1ac',
-                  fontSize: 14,
-                  flexDirection: 'column',
-                  gap: 12,
-                }}
-              >
-                <div>请先在「上课」中通过课堂码加入</div>
-                <button
-                  onClick={() => setActive('class')}
-                  style={{
-                    padding: '8px 16px',
-                    border: 'none',
-                    borderRadius: 8,
-                    background: '#2563eb',
-                    color: '#fff',
-                    fontSize: 13,
-                    cursor: 'pointer',
-                  }}
-                >
-                  去加入课堂
-                </button>
-              </div>
-            )
-          )}
-          {active === 'courseware' && (
-            <div
-              style={{
-                height: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: '#f7f8fa',
-                color: '#9aa1ac',
-                fontSize: 14,
-              }}
-            >
-              课件跟随即将上线
-            </div>
-          )}
-        </div>
+      {/* 右侧竖条导航 */}
+      <div style={{ position: 'absolute', top: '50%', right: 12, transform: 'translateY(-50%)', pointerEvents: 'auto' }}>
+        <FloatingDock
+          role="STUDENT"
+          active={active}
+          onChange={setActive}
+          user={user}
+          onLogout={onLogout}
+          memberCount={members.length}
+          networkStatus={connMode}
+        />
+      </div>
+
+      {/* 右上角信息面板 */}
+      <div style={{ position: 'absolute', top: 12, right: 12, pointerEvents: 'auto' }}>
+        <TopStatusBar networkStatus={connMode} memberCount={members.length} />
       </div>
     </div>
   );
@@ -250,23 +203,14 @@ function JoinPanel({
   return (
     <div
       style={{
-        height: '100%',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: '#f7f8fa',
+        width: 360,
+        background: '#fff',
+        borderRadius: 14,
+        border: '1px solid #eef0f3',
+        padding: 32,
+        boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
       }}
     >
-      <div
-        style={{
-          width: 360,
-          background: '#fff',
-          borderRadius: 14,
-          border: '1px solid #eef0f3',
-          padding: 32,
-          boxShadow: '0 8px 30px rgba(0,0,0,0.06)',
-        }}
-      >
         <div style={{ fontSize: 18, fontWeight: 600, color: '#1f2937', marginBottom: 6 }}>
           加入课堂
         </div>
@@ -311,7 +255,6 @@ function JoinPanel({
         >
           加入
         </button>
-      </div>
     </div>
   );
 }
@@ -324,17 +267,18 @@ function MemberPanel({
   members: SessionMember[];
 }) {
   return (
-    <div style={{ height: '100%', background: '#f7f8fa', padding: 24, overflow: 'auto' }}>
-      <div
-        style={{
-          maxWidth: 560,
-          margin: '0 auto',
-          background: '#fff',
-          borderRadius: 12,
-          border: '1px solid #eef0f3',
-          padding: 24,
-        }}
-      >
+    <div
+      style={{
+        width: 420,
+        maxHeight: '70vh',
+        overflow: 'auto',
+        background: '#fff',
+        borderRadius: 14,
+        border: '1px solid #eef0f3',
+        padding: 24,
+        boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
+      }}
+    >
         <div style={{ fontSize: 16, fontWeight: 600, color: '#1f2937', marginBottom: 16 }}>
           课堂 {roomCode}
         </div>
@@ -385,7 +329,6 @@ function MemberPanel({
             </div>
           ))}
         </div>
-      </div>
     </div>
   );
 }

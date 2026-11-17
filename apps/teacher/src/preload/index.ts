@@ -22,12 +22,15 @@ const api = {
       ipcRenderer.invoke('session:publish', info),
   },
   annotate: {
-    // 显示/隐藏桌面批注窗口
+    // 兼容旧调用:显示/隐藏桌面批注(现在整个窗口即悬浮层,此方法仅保留兼容)
     toggle: () => ipcRenderer.invoke('annotate:toggle'),
-    // 切换鼠标穿透模式(annotating=true 捕获鼠标可画, false 穿透到桌面)
-    setMode: (annotating: boolean) => ipcRenderer.invoke('annotate:set-mode', annotating),
-    // 关闭桌面批注窗口
+    // 切换鼠标穿透模式
+    setMode: (annotating: boolean) => ipcRenderer.invoke('pointer:set-interactive', annotating),
     close: () => ipcRenderer.invoke('annotate:close'),
+  },
+  pointer: {
+    // 切换鼠标穿透:interactive=true 捕获鼠标(悬浮组件/画笔可交互),false 穿透桌面
+    setInteractive: (interactive: boolean) => ipcRenderer.invoke('pointer:set-interactive', interactive),
   },
 };
 

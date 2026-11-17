@@ -4,6 +4,7 @@ import { io, type Socket } from 'socket.io-client';
 import FloatingDock, { TopStatusBar, BottomToolbar } from './FloatingDock';
 import ResourceLibrary from './ResourceLibrary';
 import Whiteboard from './Whiteboard';
+import DesktopDrawLayer from './DesktopDrawLayer';
 
 const SOCKET_URL = 'http://127.0.0.1:3000';
 
@@ -16,7 +17,7 @@ export default function TeacherWorkspace({
   onLogout: () => void;
 }) {
   const [active, setActive] = useState('courseware');
-  const [activeTool, setActiveTool] = useState('pen');
+  const [activeTool, setActiveTool] = useState('select');
   const [socket, setSocket] = useState<Socket | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [members, setMembers] = useState<SessionMember[]>([]);
@@ -120,82 +121,123 @@ export default function TeacherWorkspace({
   }, [active, roomCode, createSession]);
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: '#f7f8fa' }}>
-      {/* 左侧黑色悬浮导航(C30 形态) */}
-      <FloatingDock
-        role="TEACHER"
-        active={active}
-        onChange={setActive}
-        user={user}
-        onLogout={onLogout}
-        memberCount={members.length}
-        networkStatus="direct"
-      />
+    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none' }}>
+      {/* 内容层:白板全屏透明铺满,课件/课堂作为悬浮面板 */}
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: active === 'whiteboard' ? 'auto' : 'none' }}>
+        {active === 'whiteboard' && (
+          <Whiteboard socket={socket} roomCode={roomCode} isTeacher />
+        )}
+      </div>
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
-        {/* 顶部:标题 + 右上角状态(网络/班级/人数) */}
-        <div
-          style={{
-            height: 48,
-            display: 'flex',
-            alignItems: 'center',
-            padding: '0 16px',
-            borderBottom: '1px solid #eef0f3',
-            background: '#ffffff',
-            gap: 12,
-          }}
-        >
-          <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937' }}>
-            {active === 'class' && '上课'}
-            {active === 'whiteboard' && '白板'}
-            {active === 'textbook' && '课本'}
-            {active === 'courseware' && '课件'}
-            {active === 'comment' && '讲评'}
-          </div>
-          <button
-            onClick={() => (window as any).api?.annotate?.toggle?.()}
-            style={{
-              padding: '5px 12px',
-              borderRadius: 8,
-              border: '1px solid #dbeafe',
-              background: '#eff6ff',
-              color: '#2563eb',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
-            }}
-            title="在桌面上直接书写批注"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            桌面批注
-          </button>
-          <div style={{ marginLeft: 'auto' }}>
-            <TopStatusBar networkStatus="direct" memberCount={members.length} />
-          </div>
-        </div>
+      {/* 课件/课堂等:居中悬浮面板 */}
+      {active === 'courseware' && (
+        <FloatingPanel title="课件" onClose={() => setActive('class')}>
+          <ResourceLibrary userId={user.id} />
+        </FloatingPanel>
+      )}
+      {active === 'class' && (
+        <FloatingPanel title="上课" onClose={() => setActive('courseware')}>
+          <SessionPanel roomCode={roomCode} members={members} />
+        </FloatingPanel>
+      )}
+      {(active === 'textbook' || active === 'comment') && (
+        <FloatingPanel title={active === 'textbook' ? '课本' : '讲评'} onClose={() => setActive('courseware')}>
+          <Placeholder title={active === 'textbook' ? '课本' : '讲评'} />
+        </FloatingPanel>
+      )}
 
-        {/* 内容区 */}
-        <div style={{ flex: 1, overflow: 'hidden' }}>
-          {active === 'courseware' && <ResourceLibrary userId={user.id} />}
-          {active === 'whiteboard' && (
-            <Whiteboard socket={socket} roomCode={roomCode} isTeacher />
-          )}
-          {active === 'class' && (
-            <SessionPanel roomCode={roomCode} members={members} />
-          )}
-          {(active === 'textbook' || active === 'comment') && (
-            <Placeholder title={active === 'textbook' ? '课本' : '讲评'} />
-          )}
-        </div>
+      {/* 右侧竖条导航(黑色悬浮) */}
+      <div style={{ position: 'absolute', top: '50%', right: 12, transform: 'translateY(-50%)', pointerEvents: 'auto' }}>
+        <FloatingDock
+          role="TEACHER"
+          active={active}
+          onChange={setActive}
+          user={user}
+          onLogout={onLogout}
+          memberCount={members.length}
+          networkStatus="direct"
+        />
+      </div>
 
-        {/* 底部悬浮工具条(选择/画笔/板擦/互动/聚焦/更多) */}
+      {/* 右上角信息面板(网络/班级/人数) */}
+      <div style={{ position: 'absolute', top: 12, right: 12, pointerEvents: 'auto' }}>
+        <TopStatusBar networkStatus="direct" memberCount={members.length} />
+      </div>
+
+      {/* 底部横条工具栏(选择/画笔/板擦/互动/聚焦/更多) */}
+      <div style={{ position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)', pointerEvents: 'auto', zIndex: 70 }}>
         <BottomToolbar activeTool={activeTool} onToolChange={setActiveTool} />
       </div>
+
+      {/* 桌面绘制层(选中画笔时) */}
+      {activeTool === 'pen' && (
+        <DesktopDrawLayer onClose={() => setActiveTool('select')} />
+      )}
+    </div>
+  );
+}
+
+// 居中悬浮面板(课件/课堂/课本等)
+function FloatingPanel({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        width: 720,
+        maxHeight: '80vh',
+        background: '#ffffff',
+        borderRadius: 14,
+        boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
+        overflow: 'hidden',
+        pointerEvents: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+    >
+      <div
+        style={{
+          height: 48,
+          display: 'flex',
+          alignItems: 'center',
+          padding: '0 16px',
+          borderBottom: '1px solid #eef0f3',
+          background: '#ffffff',
+        }}
+      >
+        <span style={{ fontSize: 15, fontWeight: 600, color: '#1f2937' }}>{title}</span>
+        <button
+          onClick={onClose}
+          style={{
+            marginLeft: 'auto',
+            width: 28,
+            height: 28,
+            border: 'none',
+            borderRadius: 6,
+            background: 'transparent',
+            color: '#9aa1ac',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
+      <div style={{ flex: 1, overflow: 'auto' }}>{children}</div>
     </div>
   );
 }
@@ -203,7 +245,7 @@ export default function TeacherWorkspace({
 // 占位面板(课本/讲评等未实现模块)
 function Placeholder({ title }: { title: string }) {
   return (
-    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9aa1ac', fontSize: 14 }}>
+    <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9aa1ac', fontSize: 14 }}>
       {title}模块开发中
     </div>
   );
@@ -218,14 +260,11 @@ function SessionPanel({
   members: SessionMember[];
 }) {
   return (
-    <div style={{ height: '100%', background: '#f7f8fa', padding: 24, overflow: 'auto' }}>
+    <div style={{ padding: 24, overflow: 'auto' }}>
       <div
         style={{
-          maxWidth: 560,
-          margin: '0 auto',
           background: '#fff',
           borderRadius: 12,
-          border: '1px solid #eef0f3',
           padding: 24,
         }}
       >

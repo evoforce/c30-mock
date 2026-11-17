@@ -80,14 +80,15 @@ export default function FloatingDock({
     <div
       style={{
         width: 64,
-        height: '100%',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        background: '#1b1b1f',
+        background: 'rgba(27, 27, 31, 0.92)',
+        borderRadius: 16,
         paddingTop: 14,
         paddingBottom: 14,
         position: 'relative',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
       }}
     >
       {/* 左上角:头像 + 名称(点击弹菜单) */}

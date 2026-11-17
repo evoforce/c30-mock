@@ -6,8 +6,6 @@ import { createLocalSessionServer, type LocalSessionServer } from './localSessio
 
 let mainWindow: BrowserWindow | null = null;
 let localServer: LocalSessionServer | null = null;
-// 桌面批注窗口:全屏透明置顶,画笔覆盖在桌面任意界面之上
-let annotateWindow: BrowserWindow | null = null;
 
 // 获取本机局域网 IPv4 地址
 function getLanIP(): string {
@@ -23,20 +21,30 @@ function getLanIP(): string {
 }
 
 function createWindow(): void {
+  // 主窗口 = 全屏透明悬浮层,覆盖桌面,桌面壁纸/图标透出
+  const { width, height } = screen.getPrimaryDisplay().bounds;
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 960,
-    minHeight: 600,
+    x: 0,
+    y: 0,
+    width,
+    height,
     show: false,
-    frame: false, // 无边框窗口,自绘标题栏与控制区
+    frame: false,
+    transparent: true, // 透明背景,桌面内容透出
+    backgroundColor: '#00000000', // 透明
+    resizable: false,
+    movable: false,
+    hasShadow: false,
+    skipTaskbar: false, // 显示在任务栏(可切换回)
     autoHideMenuBar: true,
-    backgroundColor: '#ffffff',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
     },
   });
+
+  // 默认可交互(登录页/悬浮组件可点击);仅在"穿透模式"时由渲染层调用 set-interactive(false) 穿透到桌面
+  mainWindow.setIgnoreMouseEvents(false);
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show();
@@ -51,14 +59,6 @@ function createWindow(): void {
     console.error('[renderer] process gone:', JSON.stringify(details));
   });
 
-  // 最大化状态变化时通知渲染层,用于切换"最大化/还原"按钮图标
-  mainWindow.on('maximize', () => {
-    mainWindow?.webContents.send('window:maximized', true);
-  });
-  mainWindow.on('unmaximize', () => {
-    mainWindow?.webContents.send('window:maximized', false);
-  });
-
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
     return { action: 'deny' };
@@ -71,72 +71,12 @@ function createWindow(): void {
   }
 }
 
-// 桌面批注窗口:全屏透明置顶,可穿透鼠标到桌面
-function createAnnotateWindow(): void {
-  const { width, height } = screen.getPrimaryDisplay().bounds;
-  annotateWindow = new BrowserWindow({
-    x: 0,
-    y: 0,
-    width,
-    height,
-    frame: false,
-    transparent: true, // 透明背景,桌面内容透出
-    alwaysOnTop: true, // 置顶,覆盖在任意窗口之上
-    skipTaskbar: true, // 不占任务栏
-    resizable: false,
-    movable: false,
-    hasShadow: false,
-    focusable: true,
-    fullscreenable: false,
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
-    },
-  });
-
-  // 关键:默认鼠标穿透,让桌面/下方窗口可正常点击;
-  // 进入批注模式时再关闭穿透(setIgnoreMouseEvents(false))。
-  annotateWindow.setIgnoreMouseEvents(true, { forward: true });
-  annotateWindow.setAlwaysOnTop(true, 'screen-saver');
-
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    annotateWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#/annotate`);
-  } else {
-    annotateWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: '/annotate' });
-  }
-
-  annotateWindow.on('closed', () => {
-    annotateWindow = null;
-  });
-}
-
-// 桌面批注 IPC 控制
-function registerAnnotateControls(): void {
-  // 显示/隐藏批注窗口
-  ipcMain.handle('annotate:toggle', () => {
-    if (!annotateWindow) {
-      createAnnotateWindow();
-    }
-    const visible = annotateWindow?.isVisible() ?? false;
-    if (visible) {
-      annotateWindow?.hide();
-    } else {
-      annotateWindow?.show();
-    }
-    return { visible: !visible };
-  });
-
-  // 切换鼠标穿透模式:annotating=true 时捕获鼠标(可画),false 时穿透到桌面
-  ipcMain.handle('annotate:set-mode', (_e, annotating: boolean) => {
-    if (!annotateWindow) return { ok: false };
-    // forward:true 让鼠标移动事件仍能透传给窗口(用于 hover 检测),但点击穿透
-    annotateWindow.setIgnoreMouseEvents(!annotating, { forward: true });
-    return { ok: true };
-  });
-
-  // 关闭批注窗口
-  ipcMain.handle('annotate:close', () => {
-    annotateWindow?.close();
+// 鼠标穿透控制:悬浮层默认穿透到桌面,仅可交互区域(导航条/面板/画笔)关闭穿透
+function registerPointerControl(): void {
+  // interactive=true 时捕获鼠标(悬浮组件/画笔可交互),false 时穿透到桌面
+  ipcMain.handle('pointer:set-interactive', (_e, interactive: boolean) => {
+    if (!mainWindow) return { ok: false };
+    mainWindow.setIgnoreMouseEvents(!interactive, { forward: true });
     return { ok: true };
   });
 }
@@ -192,7 +132,7 @@ ipcMain.handle('session:publish', async (_e, info: { roomCode: string; teacherNa
 app.whenReady().then(() => {
   registerWindowControls();
   registerLocalSessionServer();
-  registerAnnotateControls();
+  registerPointerControl();
   createWindow();
 
   app.on('activate', () => {
