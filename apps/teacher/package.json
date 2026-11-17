@@ -14,7 +14,9 @@
     "@c30/mdsd": "workspace:*",
     "@c30/shared": "workspace:*",
     "@c30/ui": "workspace:*",
+    "lucide-react": "^1.74.0",
     "normalize.css": "^8.0.1",
+    "socket.io": "^4.8.4",
     "socket.io-client": "^4.8.4"
   },
   "devDependencies": {
