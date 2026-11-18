@@ -166,7 +166,7 @@ export interface Danmaku {
 // 课堂互动控制(教师端可开/关)
 export interface InteractionControl {
   danmakuEnabled: boolean; // 是否允许发送弹幕
-  quizEnabled: boolean;    // 是否开放答题
+  interactEnabled: boolean; // 是否开放课堂互动(随机点名/抢答/举手/投票/观点云/计时)
 }
 
 export type InteractionEvent =

@@ -12,13 +12,14 @@ import type {
   ImageItem,
   WhiteboardTheme,
 } from '@c30/shared';
-import { PEN_DEFAULT_OPACITY, sortImagesByZ } from '@c30/shared';
+import { PEN_DEFAULT_OPACITY, sortImagesByZ, countStudents } from '@c30/shared';
 import { CanvasRenderer } from './Renderer';
 import WhiteboardToolbar, { type ToolConfig } from './WhiteboardToolbar';
 import MemberOverlay from './MemberOverlay';
 import JoinToast from './JoinToast';
 import DanmakuLayer from './DanmakuLayer';
 import DanmakuInput from './DanmakuInput';
+import StudentInteract from './StudentInteract';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
 const COLORS = [
@@ -64,6 +65,21 @@ interface Props {
   socket: Socket | null;
   roomCode: string;
   isTeacher: boolean;
+  /** 学生本人 userId(互动面板需要知道「我的响应/我举手了没」) */
+  userId?: string;
+  /** 课堂互动控制(弹幕开关 / 允许互动),由外层 Workspace 统一持有 */
+  interaction: InteractionControl;
+  onInteractionChange?: (patch: Partial<InteractionControl>) => void;
+  /**
+   * 舞台形态:
+   *   · board  —— 白板模式:白底 + 主题背景 + 完整白板;
+   *   · screen —— 投屏模式:背景透明,只把「笔迹/图片/互动」叠在老师屏幕视频上。
+   */
+  variant?: 'board' | 'screen';
+  /** 是否显示白板自带的外围 UI(成员面板/加入提示/弹幕输入/跟随提示) */
+  showChrome?: boolean;
+  /** 是否显示内嵌的课堂互动浮层(新窗口壳在舞台层单独渲染,避免被画布缩放) */
+  showInteract?: boolean;
 }
 
 // 一次绘制操作(用于本地 undo)
@@ -74,7 +90,17 @@ interface DrawOp {
   clearedStrokes?: Stroke[];
 }
 
-export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
+export default function Whiteboard({
+  socket,
+  roomCode,
+  isTeacher,
+  userId,
+  interaction,
+  onInteractionChange,
+  variant = 'board',
+  showChrome = true,
+  showInteract = true,
+}: Props) {
   // 浮层缩放:成员按钮/提示条等按屏幕尺寸等比放大
   const uiScale = useOverlayScale();
   const spx = (n: number) => scaled(n, uiScale);
@@ -113,10 +139,6 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
   const [showMemberPanel, setShowMemberPanel] = useState(false);
   const [toasts, setToasts] = useState<{ id: string; name: string }[]>([]);
   const [danmakuList, setDanmakuList] = useState<Danmaku[]>([]);
-  const [interaction, setInteraction] = useState<InteractionControl>({
-    danmakuEnabled: true,
-    quizEnabled: true,
-  });
 
   // 白板背景主题(跟随教师端)
   const [theme, setTheme] = useState<WhiteboardTheme>('white');
@@ -476,9 +498,6 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
     const onDanmaku = (d: Danmaku) => {
       setDanmakuList((prev) => [...prev.slice(-49), d]);
     };
-    const onInteraction = (d: { control: InteractionControl }) => {
-      setInteraction(d.control);
-    };
 
     socket.on('whiteboard.state', onWbState);
     socket.on('whiteboard.event', onWbEvent);
@@ -486,7 +505,6 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
     socket.on('session.memberLeave', onMemberLeave);
     socket.on('session.members', onMembers);
     socket.on('danmaku.push', onDanmaku);
-    socket.on('interaction.control', onInteraction);
 
     if (roomCode) {
       socket.emit('whiteboard.state', { roomCode });
@@ -500,7 +518,6 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
       socket.off('session.memberLeave', onMemberLeave);
       socket.off('session.members', onMembers);
       socket.off('danmaku.push', onDanmaku);
-      socket.off('interaction.control', onInteraction);
     };
   }, [socket, roomCode, redrawAll]);
 
@@ -511,18 +528,22 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
     }
   };
 
-  // 更新互动开关(教师端)
+  // 更新互动开关(教师端):真正的写入由外层 Workspace 完成(单一真源)
   const updateInteraction = (patch: Partial<InteractionControl>) => {
-    const next = { ...interaction, ...patch };
-    setInteraction(next);
-    if (socket && roomCode) {
-      socket.emit('interaction.control', { roomCode, control: next });
-    }
+    onInteractionChange?.(patch);
   };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', ...backgroundFor(theme) }}>
+      <div
+        style={{
+          flex: 1,
+          position: 'relative',
+          overflow: 'hidden',
+          // 投屏模式:背景透明,让底层老师屏幕视频透出来,只叠笔迹/图片/互动
+          ...(variant === 'screen' ? { backgroundColor: 'transparent' } : backgroundFor(theme)),
+        }}
+      >
         {/* 图片分两层渲染(与教师端一致):
             · 底图(未置顶)在 canvas 之前 → 笔迹压在上面;
             · 置顶图(aboveStrokes)在 canvas 之后 → 盖住笔迹。 */}
@@ -597,7 +618,7 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
 
         <DanmakuLayer danmakuList={danmakuList} />
 
-        {!isTeacher && (
+        {showChrome && !isTeacher && (
           <div
             style={{
               position: 'absolute',
@@ -612,23 +633,35 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
               pointerEvents: 'none',
             }}
           >
-            正在跟随教师白板 · {members.length} 人在线
+            正在跟随教师白板 · {countStudents(members)} 名同学在线
           </div>
         )}
 
-        {!isTeacher && interaction.danmakuEnabled && <DanmakuInput onSubmit={sendDanmaku} />}
+        {showChrome && !isTeacher && interaction.danmakuEnabled && <DanmakuInput onSubmit={sendDanmaku} />}
 
-        <MemberOverlay
-          members={members}
-          open={showMemberPanel}
-          onToggle={() => setShowMemberPanel((v) => !v)}
-          isTeacher={isTeacher}
-          interaction={interaction}
-          onInteractionChange={isTeacher ? updateInteraction : undefined}
-          rightOffset={spx(104)}
-        />
+        {/* 学生端课堂互动:举手常驻 + 投票/抢答/观点云/计时/点名卡片 */}
+        {showInteract && !isTeacher && userId && (
+          <StudentInteract
+            socket={socket}
+            roomCode={roomCode}
+            userId={userId}
+            enabled={interaction.interactEnabled}
+          />
+        )}
 
-        <JoinToast toasts={toasts} />
+        {showChrome && (
+          <MemberOverlay
+            members={members}
+            open={showMemberPanel}
+            onToggle={() => setShowMemberPanel((v) => !v)}
+            isTeacher={isTeacher}
+            interaction={interaction}
+            onInteractionChange={isTeacher ? updateInteraction : undefined}
+            rightOffset={spx(104)}
+          />
+        )}
+
+        {showChrome && <JoinToast toasts={toasts} />}
       </div>
 
       {isTeacher && (

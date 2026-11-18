@@ -134,9 +134,9 @@ export default function MemberOverlay({
               />
               <SwitchRow
                 icon={<ListChecks size={px(17)} />}
-                label="参与答题"
-                checked={interaction.quizEnabled}
-                onChange={(v) => onInteractionChange({ quizEnabled: v })}
+                label="课堂互动"
+                checked={interaction.interactEnabled}
+                onChange={(v) => onInteractionChange({ interactEnabled: v })}
                 scale={s}
               />
               <div

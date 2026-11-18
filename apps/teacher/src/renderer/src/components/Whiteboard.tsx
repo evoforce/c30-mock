@@ -13,7 +13,7 @@ import type {
   WhiteboardTheme,
   PenType,
 } from '@c30/shared';
-import { PEN_DEFAULT_OPACITY, sortImagesByZ } from '@c30/shared';
+import { PEN_DEFAULT_OPACITY, sortImagesByZ, countStudents } from '@c30/shared';
 import { ArrowUpToLine, ArrowDownToLine, Copy, Trash2, Lock, Unlock, RotateCw, Crop } from 'lucide-react';
 import { CanvasRenderer } from './Renderer';
 import {
@@ -47,6 +47,10 @@ interface Props {
   penConfig?: PenConfig;
   // 板擦半径(来自底部工具条「板擦」菜单,与桌面批注一致)
   eraserRadius?: number;
+  // 课堂互动控制(弹幕开关 / 允许互动):由外层 Workspace 统一持有,
+  // 避免白板与互动面板各存一份、互相覆盖服务端状态。
+  interaction: InteractionControl;
+  onInteractionChange?: (patch: Partial<InteractionControl>) => void;
 }
 
 // 白板背景主题定义:背景色 + 可选网格/格线纹理
@@ -161,6 +165,8 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     activeTool = 'pen',
     penConfig,
     eraserRadius = 40,
+    interaction,
+    onInteractionChange,
   },
   ref,
 ) {
@@ -258,10 +264,6 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   const [showMemberPanel, setShowMemberPanel] = useState(false);
   const [toasts, setToasts] = useState<{ id: string; name: string }[]>([]);
   const [danmakuList, setDanmakuList] = useState<Danmaku[]>([]);
-  const [interaction, setInteraction] = useState<InteractionControl>({
-    danmakuEnabled: true,
-    quizEnabled: true,
-  });
 
   // 白板背景主题 + 主题面板开关
   const [theme, setTheme] = useState<WhiteboardTheme>('white');
@@ -1285,7 +1287,6 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     if (!socket) return;
 
     const onWbState = (snap: { roomCode: string; strokes: Stroke[]; images?: ImageItem[]; theme?: WhiteboardTheme; nextSeq: number }) => {
-      console.log('[whiteboard] 收到快照 theme =', JSON.stringify(snap.theme), 'roomCode =', snap.roomCode);
       strokesRef.current = [...snap.strokes];
       // 按 id 合并:教师端「插入白板」的底图是先本地追加、再广播的,
       // 若快照先一步返回(此时服务端还没收到 image.append),直接覆盖会把本地底图冲掉。
@@ -1391,9 +1392,6 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     const onDanmaku = (d: Danmaku) => {
       setDanmakuList((prev) => [...prev.slice(-49), d]);
     };
-    const onInteraction = (d: { control: InteractionControl }) => {
-      setInteraction(d.control);
-    };
 
     socket.on('whiteboard.state', onWbState);
     socket.on('whiteboard.event', onWbEvent);
@@ -1401,7 +1399,6 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     socket.on('session.memberLeave', onMemberLeave);
     socket.on('session.members', onMembers);
     socket.on('danmaku.push', onDanmaku);
-    socket.on('interaction.control', onInteraction);
 
     if (roomCode) {
       socket.emit('whiteboard.state', { roomCode });
@@ -1415,7 +1412,6 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       socket.off('session.memberLeave', onMemberLeave);
       socket.off('session.members', onMembers);
       socket.off('danmaku.push', onDanmaku);
-      socket.off('interaction.control', onInteraction);
     };
   }, [socket, roomCode, redrawAll]);
 
@@ -1426,18 +1422,13 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     }
   };
 
-  // 更新互动开关(教师端)
+  // 更新互动开关(教师端):真正的写入由外层 Workspace 完成(单一真源)
   const updateInteraction = (patch: Partial<InteractionControl>) => {
-    const next = { ...interaction, ...patch };
-    setInteraction(next);
-    if (socket && roomCode) {
-      socket.emit('interaction.control', { roomCode, control: next });
-    }
+    onInteractionChange?.(patch);
   };
 
   // 切换白板背景主题(教师端),广播给全员
   const changeTheme = (t: WhiteboardTheme) => {
-    console.log('[whiteboard] changeTheme ->', t, 'socket =', !!socket, 'roomCode =', JSON.stringify(roomCode));
     setTheme(t);
     setShowThemePanel(false);
     if (socket && roomCode) {
@@ -1617,7 +1608,7 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
               pointerEvents: 'none',
             }}
           >
-            正在跟随教师白板 · {members.length} 人在线
+            正在跟随教师白板 · {countStudents(members)} 名同学在线
           </div>
         )}
 
