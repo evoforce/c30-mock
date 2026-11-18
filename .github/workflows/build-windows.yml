@@ -137,8 +137,10 @@ jobs:
             }
 
             # tag 已存在 = 这个版本发布过了；说明没有新的 changeset 需要发布。
-            git ls-remote --exit-code --tags origin "refs/tags/$tag" *> $null
-            if ($LASTEXITCODE -eq 0) {
+            # 注意：不要用 `git ls-remote --exit-code`（tag 不存在时返回 2，PowerShell
+            # 进程退出码会沿用它 → 步骤失败）。这里用空输出判断，git 本身始终返回 0。
+            $existingTag = (git ls-remote --tags origin "refs/tags/$tag" 2>$null) -join ''
+            if ($existingTag.Trim()) {
               throw "tag $tag 已存在：没有新的 changeset 需要发布。如需重发该版本，请先删除对应的 Release 与 tag。"
             }
             Write-Host "changeset version 完成：$tag（教师端/学生端均为 $version）"
