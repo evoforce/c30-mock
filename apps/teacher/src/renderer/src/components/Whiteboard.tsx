@@ -14,7 +14,7 @@ import type {
   PenType,
 } from '@c30/shared';
 import { PEN_DEFAULT_OPACITY, sortImagesByZ } from '@c30/shared';
-import { ArrowUpToLine, Copy, Trash2 } from 'lucide-react';
+import { ArrowUpToLine, ArrowDownToLine, Copy, Trash2 } from 'lucide-react';
 import { CanvasRenderer } from './Renderer';
 import {
   eraserRectAt,
@@ -543,6 +543,8 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   const imageBox = selectedImage
     ? { x: selectedImage.x, y: selectedImage.y, w: selectedImage.w, h: selectedImage.h }
     : null;
+  /** 当前最上层的图片 id:操作条据此在「置顶 / 取消置顶」之间切换 */
+  const topImageId = sortImagesByZ(images).at(-1)?.id;
 
   /** 命中测试:从最上层(z 最大)往下找第一张包含该点的图片 */
   const hitImageAt = (x: number, y: number): ImageItem | null => {
@@ -580,13 +582,27 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     emit({ type: 'image.update', payload: next });
   };
 
-  /** 置顶:把 z 提到最大(叠放次序由 z 决定,两端一致;可撤销) */
-  const bringImageToFront = useCallback(
+  /** 置顶 / 取消置顶:在「图片最上层」与「原来的层序」之间切换(可撤销) */
+  const pinnedPrevZRef = useRef<Map<string, number>>(new Map());
+  const toggleImageFront = useCallback(
     (id: string) => {
       const im = imagesRef.current.find((x) => x.id === id);
       if (!im) return;
-      const before = { ...im };
-      const after: ImageItem = { ...im, z: nextImageZ() };
+      const list = sortImagesByZ(imagesRef.current);
+      const isTop = list[list.length - 1]?.id === id;
+      const before: ImageItem = { ...im };
+      let nextZ: number;
+      if (isTop) {
+        // 取消置顶:回到置顶前的层序(记不到就放到最下面)
+        const prev = pinnedPrevZRef.current.get(id);
+        const minZ = list.reduce((m, it) => Math.min(m, it.z ?? it.seq ?? 0), Number.POSITIVE_INFINITY);
+        nextZ = prev ?? (Number.isFinite(minZ) ? minZ - 1 : 0);
+        pinnedPrevZRef.current.delete(id);
+      } else {
+        pinnedPrevZRef.current.set(id, im.z ?? im.seq ?? 0);
+        nextZ = list.reduce((m, it) => Math.max(m, it.z ?? it.seq ?? 0), 0) + 1;
+      }
+      const after: ImageItem = { ...im, z: nextZ };
       applyImageLocal(after);
       emit({ type: 'image.update', payload: after });
       pushImageOp({ kind: 'image.update', imageBefore: before, imageAfter: after });
@@ -722,7 +738,8 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       return;
     }
     if (t.activeTool === 'select') {
-      // ① 已选中图片:先判手柄(缩放)、再判图片内部(移动)
+      // 交互约定:图片必须**先选中**才会出现定位框,也只有选中后才能拖动/缩放。
+      // ① 已选中的图片:点手柄 = 缩放,点框内 = 移动
       if (selectedImage) {
         const box = { x: selectedImage.x, y: selectedImage.y, w: selectedImage.w, h: selectedImage.h };
         const handle = hitHandle(box, x, y);
@@ -741,22 +758,14 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
           return;
         }
       }
-      // ② 点到某张图片(从上往下找):选中它并开始拖动
+      // ② 点到「未选中」的图片:本次只做选中(不跟手移动),再拖才会动
       const hit = hitImageAt(x, y);
       if (hit) {
         setImageSel(hit.id);
         setSelection(null);
         setRubberBand(null);
         transformRef.current = null;
-        imageDragRef.current = {
-          mode: 'move',
-          id: hit.id,
-          startX: x,
-          startY: y,
-          orig: { x: hit.x, y: hit.y, w: hit.w, h: hit.h },
-          ratio: hit.h > 0 ? hit.w / hit.h : 1,
-        };
-        canvasRef.current?.setPointerCapture(e.pointerId);
+        imageDragRef.current = null;
         return;
       }
       // ③ 点到空白:取消图片选中
@@ -1315,14 +1324,15 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
         )}
 
         {/* 图片选中:蓝色框 + 8 个手柄(拖动移动、四角等比缩放),
-            框上方浮出操作条:置顶 / 复制 / 删除 */}
+            框上方浮出操作条:置顶/取消置顶 · 复制 · 删除 */}
         {isTeacher && imageBox && selectedImage && (
           <>
             <SelectionBox box={imageBox} scale={uiScale} />
             <ImageActionBar
               box={imageBox}
               scale={uiScale}
-              onFront={() => bringImageToFront(selectedImage.id)}
+              pinned={topImageId === selectedImage.id}
+              onToggleFront={() => toggleImageFront(selectedImage.id)}
               onDuplicate={() => duplicateImage(selectedImage.id)}
               onDelete={() => removeImage(selectedImage.id)}
             />
@@ -1475,22 +1485,26 @@ export default Whiteboard;
 export { COLORS };
 
 // 图片操作条:选中图片后浮在框上方(上方放不下就挪到下方)。
-// 置顶 = 把图片移到图片数组末尾(最后绘制 = 最上层);复制 = 错开 24px 贴一张新图。
+// 图片操作条:置顶/取消置顶(按当前层序切换)· 复制 · 删除。
+// 置顶 = 压在其他图片之上;取消置顶 = 回到置顶前的层序。
 function ImageActionBar({
   box,
   scale,
-  onFront,
+  pinned,
+  onToggleFront,
   onDuplicate,
   onDelete,
 }: {
   box: { x: number; y: number; w: number; h: number };
   scale: number;
-  onFront: () => void;
+  /** 该图片当前是否已在最上层 → 按钮显示「取消置顶」 */
+  pinned: boolean;
+  onToggleFront: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
   const px = (n: number) => scaled(n, scale);
-  const barW = px(228);
+  const barW = px(268);
   const barH = px(40);
   const gap = px(10);
   const above = box.y - barH - gap >= 8;
@@ -1499,18 +1513,22 @@ function ImageActionBar({
 
   const Btn = ({
     label,
+    title,
     Icon,
     onClick,
     danger,
+    active,
   }: {
     label: string;
+    title?: string;
     Icon: typeof ArrowUpToLine;
     onClick: () => void;
     danger?: boolean;
+    active?: boolean;
   }) => (
     <button
       onClick={onClick}
-      title={label}
+      title={title ?? label}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -1519,17 +1537,17 @@ function ImageActionBar({
         borderRadius: px(9),
         border: 'none',
         cursor: 'pointer',
-        background: 'transparent',
-        color: danger ? '#f87171' : '#e5e7eb',
+        background: active ? 'rgba(37,99,235,0.9)' : 'transparent',
+        color: danger ? '#f87171' : active ? '#ffffff' : '#e5e7eb',
         fontSize: px(12),
         outline: 'none',
         whiteSpace: 'nowrap',
       }}
       onMouseEnter={(e) => {
-        (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.1)';
+        if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.1)';
       }}
       onMouseLeave={(e) => {
-        (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+        if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
       }}
     >
       <Icon size={px(15)} />
@@ -1557,7 +1575,13 @@ function ImageActionBar({
         userSelect: 'none',
       }}
     >
-      <Btn label="置顶" Icon={ArrowUpToLine} onClick={onFront} />
+      <Btn
+        label={pinned ? '取消置顶' : '置顶'}
+        title={pinned ? '取消置顶：回到原来的层序' : '置顶：压在其他图片之上'}
+        Icon={pinned ? ArrowDownToLine : ArrowUpToLine}
+        active={pinned}
+        onClick={onToggleFront}
+      />
       <Btn label="复制" Icon={Copy} onClick={onDuplicate} />
       <Btn label="删除" Icon={Trash2} onClick={onDelete} danger />
     </div>
