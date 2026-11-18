@@ -1,7 +1,7 @@
 import type { PenType } from '@c30/shared';
 import { Brush, Pencil, Highlighter } from 'lucide-react';
 
-// 画笔设置面板:对齐 C30 形态(白色圆角悬浮面板)
+// 画笔设置面板:黑色浮层风格(与底部工具栏一致),替代白色控件。
 // 三行:笔形(毛笔/铅笔/马克笔) + 粗细(4档) + 颜色(两排色块 + 自定义调色板)
 
 const PEN_TYPES: { key: PenType | 'highlighter'; label: string; icon: React.ReactNode }[] = [
@@ -10,7 +10,7 @@ const PEN_TYPES: { key: PenType | 'highlighter'; label: string; icon: React.Reac
   { key: 'highlighter', label: '马克笔', icon: <Highlighter size={20} /> },
 ];
 
-// 颜色:两排,第一排基础色,第二排扩展色(对齐 C30 截图)
+// 颜色:两排,第一排基础色,第二排扩展色
 const COLORS_ROW1 = ['#ffffff', '#1f2937', '#2563eb', '#16a34a', '#f59e0b', '#e5484d'];
 const COLORS_ROW2 = ['#f97316', '#ec4899', '#a855f7', '#84cc16', '#14b8a6', 'custom'];
 
@@ -23,11 +23,9 @@ export interface PenConfig {
 export default function PenPanel({
   config,
   onChange,
-  onClose,
 }: {
   config: PenConfig;
   onChange: (c: PenConfig) => void;
-  onClose: () => void;
 }) {
   // 粗细档位映射到具体宽度
   const WIDTH_LEVELS = [3, 6, 10, 16];
@@ -35,46 +33,14 @@ export default function PenPanel({
   return (
     <div
       style={{
-        width: 420,
-        background: '#ffffff',
-        borderRadius: 14,
-        boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
+        width: 440,
+        background: '#1b1b1f',
+        borderRadius: 16,
+        boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
         overflow: 'hidden',
+        border: '1px solid #333339',
       }}
     >
-      {/* 标题栏 */}
-      <div
-        style={{
-          height: 44,
-          display: 'flex',
-          alignItems: 'center',
-          padding: '0 16px',
-          borderBottom: '1px solid #eef0f3',
-        }}
-      >
-        <span style={{ fontSize: 14, fontWeight: 500, color: '#6b7280' }}>画笔</span>
-        <button
-          onClick={onClose}
-          style={{
-            marginLeft: 'auto',
-            width: 26,
-            height: 26,
-            border: 'none',
-            borderRadius: 6,
-            background: 'transparent',
-            color: '#9aa1ac',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
-          </svg>
-        </button>
-      </div>
-
       {/* 笔形 */}
       <Row label="笔形">
         <div style={{ display: 'flex', gap: 12 }}>
@@ -83,24 +49,24 @@ export default function PenPanel({
               key={pt.key}
               onClick={() => onChange({ ...config, penType: pt.key })}
               style={{
-                width: 52,
-                height: 52,
-                borderRadius: 10,
-                border: config.penType === pt.key ? '2px solid #2563eb' : '1px solid #e2e5ea',
-                background: config.penType === pt.key ? '#eff6ff' : '#fff',
-                color: config.penType === pt.key ? '#2563eb' : '#6b7280',
+                width: 60,
+                height: 60,
+                borderRadius: 12,
+                border: config.penType === pt.key ? '2px solid #3b82f6' : '1px solid #3a3a40',
+                background: config.penType === pt.key ? 'rgba(59,130,246,0.18)' : 'transparent',
+                color: config.penType === pt.key ? '#60a5fa' : '#9ca3af',
                 cursor: 'pointer',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: 4,
+                gap: 5,
                 outline: 'none',
                 padding: 0,
               }}
             >
               {pt.icon}
-              <span style={{ fontSize: 11 }}>{pt.label}</span>
+              <span style={{ fontSize: 12 }}>{pt.label}</span>
             </button>
           ))}
         </div>
@@ -114,11 +80,11 @@ export default function PenPanel({
               key={i}
               onClick={() => onChange({ ...config, strokeWidth: i })}
               style={{
-                width: 52,
-                height: 40,
-                borderRadius: 8,
-                border: config.strokeWidth === i ? '2px solid #2563eb' : '1px solid #e2e5ea',
-                background: '#fff',
+                width: 60,
+                height: 44,
+                borderRadius: 10,
+                border: config.strokeWidth === i ? '2px solid #3b82f6' : '1px solid #3a3a40',
+                background: 'transparent',
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
@@ -128,13 +94,13 @@ export default function PenPanel({
               }}
             >
               {/* 斜线粗细示意 */}
-              <svg width="30" height="24" viewBox="0 0 30 24">
+              <svg width="34" height="26" viewBox="0 0 30 24">
                 <line
                   x1="6"
                   y1="20"
                   x2="24"
                   y2="4"
-                  stroke={config.strokeWidth === i ? '#2563eb' : '#9aa1ac'}
+                  stroke={config.strokeWidth === i ? '#60a5fa' : '#9ca3af'}
                   strokeWidth={2 + i * 2}
                   strokeLinecap="round"
                 />
@@ -169,10 +135,10 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
       style={{
         display: 'flex',
         padding: '14px 16px',
-        borderBottom: '1px solid #f0f2f5',
+        borderBottom: '1px solid #2a2a30',
       }}
     >
-      <div style={{ width: 48, flexShrink: 0, fontSize: 13, color: '#6b7280', paddingTop: 12 }}>
+      <div style={{ width: 48, flexShrink: 0, fontSize: 13, color: '#9ca3af', paddingTop: 14 }}>
         {label}
       </div>
       <div style={{ flex: 1 }}>{children}</div>
@@ -195,26 +161,26 @@ function ColorDot({
     <button
       onClick={onClick}
       style={{
-        width: 34,
-        height: 34,
+        width: 32,
+        height: 32,
         borderRadius: '50%',
-        border: selected ? '2px solid #2563eb' : '1px solid #e2e5ea',
+        border: selected ? '2px solid #3b82f6' : '1px solid #3a3a40',
         cursor: 'pointer',
         padding: 0,
         position: 'relative',
         background: isCustom
           ? 'conic-gradient(#ef4444, #f59e0b, #84cc16, #06b6d4, #3b82f6, #a855f7, #ef4444)'
           : color,
-        outline: selected ? '2px solid #2563eb' : 'none',
+        outline: selected ? '2px solid #3b82f6' : 'none',
         outlineOffset: 2,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
       }}
     >
-      {/* 白色色块加边框便于在浅色面板上可见 */}
+      {/* 白色色块加边框便于在深色面板上可见 */}
       {color === '#ffffff' && !isCustom && (
-        <div style={{ width: 34, height: 34, borderRadius: '50%', border: '1px solid #d5d9e0' }} />
+        <div style={{ width: 32, height: 32, borderRadius: '50%', border: '1px solid #4b5563' }} />
       )}
       {/* 选中对勾 */}
       {selected && !isCustom && (
@@ -223,7 +189,7 @@ function ColorDot({
           height="14"
           viewBox="0 0 24 24"
           fill="none"
-          stroke={color === '#ffffff' ? '#2563eb' : '#ffffff'}
+          stroke={color === '#ffffff' ? '#3b82f6' : '#ffffff'}
           strokeWidth="3"
           style={{ position: 'absolute' }}
         >
@@ -240,14 +206,14 @@ function ColorDot({
             width: 14,
             height: 14,
             borderRadius: '50%',
-            background: '#fff',
-            border: '1px solid #e2e5ea',
+            background: '#1b1b1f',
+            border: '1px solid #3a3a40',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
           }}
         >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2">
             <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" strokeLinecap="round" />
           </svg>
         </div>

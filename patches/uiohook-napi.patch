@@ -1,0 +1,94 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index bea57600bf7d03db29e4b38c76afe5d6d8cae1e1..2ca3d849f187e4ddb3c8441d1567e2ce9628bc62 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -189,6 +189,7 @@ declare class UiohookNapi extends EventEmitter {
+     stop(): void;
+     keyTap(key: number, modifiers?: number[]): void;
+     keyToggle(key: number, toggle: 'down' | 'up'): void;
++    setMouseConsume(consume: boolean): void;
+ }
+ export declare const uIOhook: UiohookNapi;
+ export {};
+diff --git a/dist/index.js b/dist/index.js
+index 61acc012eeb9ebcb75fc9ebaf3bbc3f677864a84..58b52b295d3cdc9ed61a2ea9ea9a4ed241cdf346 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -201,6 +201,9 @@ class UiohookNapi extends events_1.EventEmitter {
+     keyToggle(key, toggle) {
+         lib.keyTap(key, (toggle === 'down' ? KeyToggle.Down : KeyToggle.Up));
+     }
++    setMouseConsume(consume) {
++        lib.setMouseConsume(consume);
++    }
+ }
+ exports.uIOhook = new UiohookNapi();
+ //# sourceMappingURL=index.js.map
+\ No newline at end of file
+diff --git a/src/lib/addon.c b/src/lib/addon.c
+index d4dffe9e74cb2da2dbb99b65dd92173702f8beb7..3f6bc6a48374422a2a1caefb8db9163bc17cfe80 100644
+--- a/src/lib/addon.c
++++ b/src/lib/addon.c
+@@ -8,7 +8,26 @@
+ static napi_threadsafe_function threadsafe_fn = NULL;
+ static bool is_worker_running = false;
+ 
++// Whether to consume mouse pressed/released/dragged events.
++// When true (while drawing), the event is not delivered to the underlying window.
++static volatile int g_consume_mouse = 0;
++
+ void dispatch_proc(uiohook_event* const event) {
++  // Drawing interception: when enabled, set reserved=0x01 on mouse down/up/drag
++  // events. libuiohook's mouse_hook_event_proc sees reserved==0x01 and skips
++  // CallNextHookEx, so the event is swallowed (not delivered to the system).
++  if (g_consume_mouse) {
++    switch (event->type) {
++      case EVENT_MOUSE_PRESSED:
++      case EVENT_MOUSE_RELEASED:
++      case EVENT_MOUSE_DRAGGED:
++        event->reserved = 0x01;
++        break;
++      default:
++        break;
++    }
++  }
++
+   if (threadsafe_fn == NULL) return;
+ 
+   uiohook_event* copied_event = malloc(sizeof(uiohook_event));
+@@ -311,6 +330,23 @@ napi_value AddonKeyTap (napi_env env, napi_callback_info info) {
+   return NULL;
+ }
+ 
++// Set whether to consume mouse pressed/released/dragged events.
++// When true (while drawing), libuiohook will not call CallNextHookEx,
++// so the event is not delivered to the underlying window.
++napi_value AddonSetMouseConsume (napi_env env, napi_callback_info info) {
++  size_t info_argc = 1;
++  napi_value info_argv[1];
++  bool consume = false;
++  napi_status status = napi_get_cb_info(env, info, &info_argc, info_argv, NULL, NULL);
++  NAPI_THROW_IF_FAILED(env, status, NULL);
++
++  status = napi_get_value_bool(env, info_argv[0], &consume);
++  NAPI_THROW_IF_FAILED(env, status, NULL);
++
++  g_consume_mouse = consume ? 1 : 0;
++  return NULL;
++}
++
+ NAPI_MODULE_INIT() {
+   napi_status status;
+   napi_value export_fn;
+@@ -330,6 +366,11 @@ NAPI_MODULE_INIT() {
+   status = napi_set_named_property(env, exports, "keyTap", export_fn);
+   NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_set_named_property");
+ 
++  status = napi_create_function(env, NULL, 0, AddonSetMouseConsume, NULL, &export_fn);
++  NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_create_function");
++  status = napi_set_named_property(env, exports, "setMouseConsume", export_fn);
++  NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_set_named_property");
++
+   status = napi_add_env_cleanup_hook(env, AddonCleanUp, NULL);
+   NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_add_env_cleanup_hook");
+ 

@@ -9,6 +9,8 @@ interface Props {
   isTeacher: boolean;
   interaction: InteractionControl;
   onInteractionChange?: (patch: Partial<InteractionControl>) => void;
+  // 右上角按钮的右偏移(px):白板模式下右侧有悬浮竖条(约 88px),需右移避开遮挡
+  rightOffset?: number;
 }
 
 // 右上角成员名单浮层(黑色,参考腾讯会议/钉钉的参会人面板)
@@ -19,17 +21,19 @@ export default function MemberOverlay({
   isTeacher,
   interaction,
   onInteractionChange,
+  rightOffset = 12,
 }: Props) {
   return (
     <>
       {/* 右上角触发按钮(黑色) */}
       <button
+        data-interactive
         onClick={onToggle}
         title="成员名单"
         style={{
           position: 'absolute',
           top: 12,
-          right: 12,
+          right: rightOffset,
           width: 40,
           height: 40,
           borderRadius: 10,
@@ -70,10 +74,11 @@ export default function MemberOverlay({
       {/* 浮层面板 */}
       {open && (
         <div
+          data-interactive
           style={{
             position: 'absolute',
             top: 60,
-            right: 12,
+            right: rightOffset,
             width: 264,
             background: 'rgba(17,24,39,0.95)',
             backdropFilter: 'blur(10px)',

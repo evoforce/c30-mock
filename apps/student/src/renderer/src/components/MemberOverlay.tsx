@@ -24,6 +24,7 @@ export default function MemberOverlay({
     <>
       {/* 右上角触发按钮(黑色) */}
       <button
+        data-interactive
         onClick={onToggle}
         title="成员名单"
         style={{
@@ -70,6 +71,7 @@ export default function MemberOverlay({
       {/* 浮层面板 */}
       {open && (
         <div
+          data-interactive
           style={{
             position: 'absolute',
             top: 60,

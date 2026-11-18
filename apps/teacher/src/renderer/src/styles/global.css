@@ -22,3 +22,11 @@ body {
 * {
   box-sizing: border-box;
 }
+
+/* 加载中转圈动画(窗口面板刷新等) */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+

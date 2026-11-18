@@ -5,11 +5,13 @@
 // 但只做内存状态,不做 DB 持久化(中心服务器仍可用于云同步/回放)。
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { createServer as createHttpServer } from 'http';
-import type { SessionMember, WhiteboardEvent, Stroke, InteractionControl } from '@c30/shared';
+import type { SessionMember, WhiteboardEvent, Stroke, ImageItem, InteractionControl, WhiteboardTheme } from '@c30/shared';
 
 interface RoomState {
   members: SessionMember[];
   strokes: Stroke[];
+  images: ImageItem[];
+  theme: WhiteboardTheme;
   nextSeq: number;
   interaction: InteractionControl;
 }
@@ -27,6 +29,9 @@ export function createLocalSessionServer(): LocalSessionServer {
 
   const rooms = new Map<string, RoomState>();
   const socketIndex = new Map<string, { roomCode: string; userId: string }>();
+  // teacherId → roomCode:让同一教师端重复 session.create(如 React StrictMode 双重挂载、
+  // socket 重连)复用同一课堂,避免打印多次 mDNS 广播、创建多个空课堂。
+  const teacherRooms = new Map<string, string>();
 
   function genRoomCode(): string {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -47,15 +52,29 @@ export function createLocalSessionServer(): LocalSessionServer {
     io.on('connection', (client: Socket) => {
       client.on('session.create', (body: { payload: { teacherId: string; teacherName: string } }) => {
         const { teacherId, teacherName } = body.payload;
+        // 幂等:同一教师端重复 create(StrictMode/重连)时复用已有课堂
+        const existingCode = teacherRooms.get(teacherId);
+        if (existingCode && rooms.has(existingCode)) {
+          const room = rooms.get(existingCode)!;
+          client.join(existingCode);
+          socketIndex.set(client.id, { roomCode: existingCode, userId: teacherId });
+          client.emit('session.created', { roomCode: existingCode, sessionId: existingCode });
+          client.emit('session.joined', { sessionId: existingCode, roomCode: existingCode, members: room.members });
+          client.emit('whiteboard.state', { roomCode: existingCode, strokes: room.strokes, images: room.images, theme: room.theme, nextSeq: room.nextSeq });
+          client.emit('interaction.control', { roomCode: existingCode, control: room.interaction });
+          console.log('[server] session.create 复用已有课堂', existingCode);
+          return;
+        }
         const roomCode = genRoomCode();
         const member: SessionMember = { userId: teacherId, name: teacherName, role: 'TEACHER', joinedAt: Date.now() };
         client.join(roomCode);
-        rooms.set(roomCode, { members: [member], strokes: [], nextSeq: 0, interaction: { danmakuEnabled: true, quizEnabled: true } });
+        rooms.set(roomCode, { members: [member], strokes: [], images: [], theme: 'white', nextSeq: 0, interaction: { danmakuEnabled: true, quizEnabled: true } });
         socketIndex.set(client.id, { roomCode, userId: teacherId });
+        teacherRooms.set(teacherId, roomCode);
 
         client.emit('session.created', { roomCode, sessionId: roomCode });
         client.emit('session.joined', { sessionId: roomCode, roomCode, members: [member] });
-        client.emit('whiteboard.state', { roomCode, strokes: [], nextSeq: 0 });
+        client.emit('whiteboard.state', { roomCode, strokes: [], images: [], theme: 'white', nextSeq: 0 });
         client.emit('interaction.control', { roomCode, control: { danmakuEnabled: true, quizEnabled: true } });
       });
 
@@ -76,7 +95,7 @@ export function createLocalSessionServer(): LocalSessionServer {
         socketIndex.set(client.id, { roomCode, userId });
 
         client.emit('session.joined', { sessionId: roomCode, roomCode, members: room.members });
-        client.emit('whiteboard.state', { roomCode, strokes: room.strokes, nextSeq: room.nextSeq });
+        client.emit('whiteboard.state', { roomCode, strokes: room.strokes, images: room.images, theme: room.theme, nextSeq: room.nextSeq });
         client.emit('interaction.control', { roomCode, control: room.interaction });
         client.to(roomCode).emit('session.memberJoin', { member });
       });
@@ -91,6 +110,12 @@ export function createLocalSessionServer(): LocalSessionServer {
         } else if (event.type === 'stroke.remove') {
           const ids = new Set(event.payload.strokeIds);
           room.strokes = room.strokes.filter((s) => !ids.has(s.id));
+        } else if (event.type === 'image.append') {
+          event.payload.seq = ++room.nextSeq;
+          room.images.push(event.payload);
+        } else if (event.type === 'image.remove') {
+          const ids = new Set(event.payload.imageIds);
+          room.images = room.images.filter((im) => !ids.has(im.id));
         } else if (event.type === 'undo') {
           const { removedStrokeIds, restoredStrokes } = event.payload;
           if (removedStrokeIds.length > 0) {
@@ -103,6 +128,9 @@ export function createLocalSessionServer(): LocalSessionServer {
           }
         } else if (event.type === 'stroke.clear') {
           room.strokes = [];
+        } else if (event.type === 'theme.change') {
+          room.theme = event.payload.theme;
+          console.log('[server] theme.change ->', event.payload.theme, 'room.theme =', room.theme);
         }
         client.to(roomCode).emit('whiteboard.event', event);
       });
@@ -110,10 +138,10 @@ export function createLocalSessionServer(): LocalSessionServer {
       client.on('whiteboard.state', (body: { roomCode: string }) => {
         const room = rooms.get(body.roomCode);
         if (!room) {
-          client.emit('whiteboard.state', { roomCode: body.roomCode, strokes: [], nextSeq: 0 });
+          client.emit('whiteboard.state', { roomCode: body.roomCode, strokes: [], images: [], theme: 'white', nextSeq: 0 });
           return;
         }
-        client.emit('whiteboard.state', { roomCode: body.roomCode, strokes: room.strokes, nextSeq: room.nextSeq });
+        client.emit('whiteboard.state', { roomCode: body.roomCode, strokes: room.strokes, images: room.images, theme: room.theme, nextSeq: room.nextSeq });
       });
 
       client.on('session.members', (body: { roomCode: string }) => {

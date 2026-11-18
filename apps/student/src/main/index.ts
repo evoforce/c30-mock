@@ -4,8 +4,8 @@ import { mdsd, type DiscoveryInfo } from '@c30/mdsd';
 
 let mainWindow: BrowserWindow | null = null;
 
-// 局域网教师端发现结果(供 renderer 双轨连接)
-let discoveredTeacher: DiscoveryInfo | null = null;
+// 局域网发现的教师端房间列表(去重,供渲染层展示供选择)
+const discoveredRooms = new Map<string, DiscoveryInfo>();
 
 function createWindow(): void {
   // 学生端主窗口 = 全屏透明悬浮层,覆盖桌面,桌面壁纸/图标透出
@@ -29,8 +29,8 @@ function createWindow(): void {
     },
   });
 
-  // 默认可交互(登录页/悬浮组件可点击);仅"穿透模式"时由渲染层调用 set-interactive(false)
-  mainWindow.setIgnoreMouseEvents(false);
+  // 默认穿透到桌面(可操作桌面),仅当渲染层判定鼠标悬停在可交互组件上时关闭穿透
+  mainWindow.setIgnoreMouseEvents(true, { forward: true });
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show();
@@ -77,20 +77,20 @@ function registerPointerControl(): void {
   });
 }
 
-// 局域网发现:订阅教师端 mDNS 广播,供双轨连接
+// 局域网发现:订阅教师端 mDNS 广播,收集房间列表供接收端选择进入
 function registerDiscovery(): void {
-  ipcMain.handle('discovery:get-teacher', () => {
-    return discoveredTeacher;
+  ipcMain.handle('discovery:get-rooms', () => {
+    return Array.from(discoveredRooms.values());
   });
 
   mdsd
     .subscribe((info) => {
-      discoveredTeacher = info;
-      console.log(`[discovery] 发现教师端: ${info.teacherName} @ ${info.host}:${info.port} (${info.roomCode})`);
+      discoveredRooms.set(info.roomCode, info);
+      console.log(`[discovery] 发现课堂: ${info.teacherName} @ ${info.host}:${info.port} (${info.roomCode})`);
       mainWindow?.webContents.send('discovery:found', info);
     })
     .catch((err) => {
-      console.warn('[discovery] mDNS 订阅失败(将回退中心服务器):', (err as Error)?.message ?? String(err));
+      console.warn('[discovery] mDNS 订阅失败:', (err as Error)?.message ?? String(err));
     });
 }
 

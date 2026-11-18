@@ -15,8 +15,8 @@ const api = {
     },
   },
   discovery: {
-    // 获取已发现的教师端(可能为 null)
-    getTeacher: () => ipcRenderer.invoke('discovery:get-teacher'),
+    // 获取已发现的课堂房间列表
+    getRooms: () => ipcRenderer.invoke('discovery:get-rooms'),
     // 订阅发现事件
     onFound: (cb: (info: { roomCode: string; teacherName: string; host: string; port: number }) => void) => {
       const listener = (_e: unknown, info: unknown) => cb(info as { roomCode: string; teacherName: string; host: string; port: number });

@@ -32,6 +32,8 @@ export interface Renderer {
 export class CanvasRenderer implements Renderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
+  // 记录每条笔画的已渲染点数,用于真正增量绘制(避免每 move 都全量重画整条)
+  private renderedPointCount = new Map<string, number>();
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -42,11 +44,21 @@ export class CanvasRenderer implements Renderer {
 
   /** 渲染单条笔画(核心绘制逻辑,唯一依赖 Canvas API 的地方) */
   private drawStroke(s: Stroke) {
+    this.drawSegment(s, 0, s.points.length);
+  }
+
+  /**
+   * 绘制笔画的某一段点区间 [from, to)。
+   * - from=0 时画整条(含单点兜底)
+   * - from>0 时只画 [from-1, to) 的线段(增量,避免 O(n²) 重绘)
+   */
+  private drawSegment(s: Stroke, from: number, to: number) {
     const ctx = this.ctx;
     const pts = s.points;
     if (pts.length === 0) return;
 
-    if (pts.length === 1) {
+    // 单点:画圆点
+    if (pts.length === 1 && from === 0) {
       const w = strokeWidthFor(s.tool, s.width, 0);
       ctx.globalAlpha = s.opacity;
       ctx.fillStyle = s.color;
@@ -62,19 +74,57 @@ export class CanvasRenderer implements Renderer {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    for (let i = 1; i < pts.length; i++) {
-      const p0 = pts[i - 1];
-      const p1 = pts[i];
-      const dt = Math.max(p1.t - p0.t, 1);
-      const dist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
-      const speed = dist / dt;
-      const w = strokeWidthFor(s.tool, s.width, speed);
+    // 平滑绘制:用二次贝塞尔「中点法」把相邻采样点连成连续曲线,消除折线锯齿。
+    // 增量段需回退一点作为曲线起点,保证与上一段平滑衔接(避免断点)。
+    const start = from === 0 ? 0 : Math.max(from - 1, 0);
+    if (to - start < 2) {
+      ctx.globalAlpha = 1;
+      return;
+    }
+
+    // 先画第一段(从 start 点到其后中点),宽度取首段的动态笔宽
+    let p0 = pts[start];
+    let p1 = pts[start + 1];
+    let dt = Math.max(p1.t - p0.t, 1);
+    let dist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+    let w = strokeWidthFor(s.tool, s.width, dist / dt);
+    const mid0 = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(mid0.x, mid0.y);
+    ctx.stroke();
+
+    // 后续每段:以「上一中点」为控制点、曲线过「当前中点」,整体平滑
+    let prevMid = mid0;
+    for (let i = start + 1; i < to - 1; i++) {
+      p0 = pts[i];
+      p1 = pts[i + 1];
+      dt = Math.max(p1.t - p0.t, 1);
+      dist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+      w = strokeWidthFor(s.tool, s.width, dist / dt);
+      const mid = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
       ctx.lineWidth = w;
       ctx.beginPath();
-      ctx.moveTo(p0.x, p0.y);
-      ctx.lineTo(p1.x, p1.y);
+      ctx.moveTo(prevMid.x, prevMid.y);
+      ctx.quadraticCurveTo(p0.x, p0.y, mid.x, mid.y);
       ctx.stroke();
+      prevMid = mid;
     }
+
+    // 收尾:最后一点用直线段
+    const lastPt = pts[to - 1];
+    ctx.lineWidth = strokeWidthFor(
+      s.tool,
+      s.width,
+      Math.hypot(lastPt.x - pts[to - 2].x, lastPt.y - pts[to - 2].y) /
+        Math.max(lastPt.t - pts[to - 2].t, 1),
+    );
+    ctx.beginPath();
+    ctx.moveTo(prevMid.x, prevMid.y);
+    ctx.lineTo(lastPt.x, lastPt.y);
+    ctx.stroke();
+
     ctx.globalAlpha = 1;
   }
 
@@ -92,14 +142,25 @@ export class CanvasRenderer implements Renderer {
   render(strokes: Stroke[]) {
     this.setupTransform();
     this.clearCanvas();
+    this.renderedPointCount.clear();
     for (const s of strokes) {
       this.drawStroke(s);
+      this.renderedPointCount.set(s.id, s.points.length);
     }
   }
 
   renderIncremental(stroke: Stroke) {
     this.setupTransform();
-    this.drawStroke(stroke);
+    // 真正增量:只画上次之后新增的点,消除每 move 重画整条的 O(n²) 开销
+    const last = this.renderedPointCount.get(stroke.id) ?? 0;
+    const total = stroke.points.length;
+    if (total <= last) return; // 无新增点
+    if (last === 0) {
+      this.drawStroke(stroke);
+    } else {
+      this.drawSegment(stroke, last, total);
+    }
+    this.renderedPointCount.set(stroke.id, total);
   }
 
   renderLive(liveStrokes: Stroke[]) {
@@ -118,6 +179,7 @@ export class CanvasRenderer implements Renderer {
 
   clear() {
     this.clearCanvas();
+    this.renderedPointCount.clear();
   }
 
   resize() {

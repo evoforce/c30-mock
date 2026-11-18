@@ -13,6 +13,7 @@ export default function DanmakuInput({ onSubmit }: { onSubmit: (content: string)
 
   return (
     <div
+      data-interactive
       style={{
         position: 'absolute',
         left: 16,

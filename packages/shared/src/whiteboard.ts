@@ -33,33 +33,55 @@ export interface Stroke {
   seq: number;
 }
 
+// 白板背景主题 key
+export type WhiteboardTheme =
+  | 'blackboard' // 黑板(深墨绿)
+  | 'white'      // 白板(纯白)
+  | 'green'      // 绿板(草绿)
+  | 'dot'        // 点线格(白色点阵网格纸)
+  | 'pinyin'     // 拼音田字格(米黄)
+  | 'grid';      // 田字格(米黄 + 绿色格线)
+
+// 图片元素(聚焦「插入白板」等场景):一张贴到白板上的图片
+export interface ImageItem {
+  id: string;
+  // 图片内容(dataURL 或 http 地址)
+  src: string;
+  // 放置位置(左上角)与尺寸(逻辑像素)
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  seq: number;
+}
+
 // ---- 笔锋宽度计算(速度敏感压感,两端共用) ----
 
 /**
- * 根据笔类型 + 采样点间速度,计算当前段的渲染宽度。
- * 速度越快 → 越细(模拟真实笔锋);越慢 → 越接近基础宽度上限。
+ * 根据笔类型计算当前段的渲染宽度(恒定宽度,不再随速度变化)。
+ *
+ * 说明:早期实现了「速度敏感压感」(快→细、慢→粗,模拟真实笔锋),但在教培白板场景
+ * 下会产生「起笔浓粗、快速书写变细、结尾又变粗」的观感不一致,被用户视为 bug。
+ * 故改为恒定线宽:speed 参数保留(接口兼容),但不再影响宽度。
  */
 export function strokeWidthFor(
   penType: PenType,
   baseWidth: number,
-  speed: number, // px/ms
+  speed: number, // px/ms(保留入参,恒宽模式下忽略)
 ): number {
-  // 速度影响因子:慢速(0~0.3)保持最大,高速(>2)压到最小
-  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-  const factor = clamp(1 - (speed - 0.05) * 0.55, 0.35, 1);
-
+  void speed;
   switch (penType) {
     case 'brush': {
-      // 毛笔:基础宽度最大,速度压感明显
-      return baseWidth * factor;
+      // 毛笔:基础宽度最大
+      return baseWidth;
     }
     case 'pen': {
-      // 钢笔:中等宽度,压感中等
-      return Math.max(1.5, baseWidth * 0.7 * (0.5 + factor * 0.5));
+      // 钢笔:中等宽度
+      return Math.max(1.5, baseWidth * 0.7);
     }
     case 'pencil': {
-      // 铅笔:最细,压感弱
-      return Math.max(1, baseWidth * 0.5 * (0.6 + factor * 0.4));
+      // 铅笔:最细
+      return Math.max(1, baseWidth * 0.5);
     }
     default:
       return baseWidth;
@@ -102,9 +124,14 @@ export type WhiteboardEvent =
   | { type: 'stroke.remove'; payload: { strokeIds: string[] } }
   | { type: 'stroke.erase'; payload: { strokeId: string; erasedSegments: unknown[] } }
   | { type: 'stroke.clear'; payload: { pageNo: number } }
+  // 图片元素(聚焦「插入白板」):贴一张图片到白板
+  | { type: 'image.append'; payload: ImageItem }
+  | { type: 'image.remove'; payload: { imageIds: string[] } }
   // 撤销/重做:广播具体笔画变更(学生端复用 append/remove 语义,无需本地 undo 栈)
   | { type: 'undo'; payload: { removedStrokeIds: string[]; restoredStrokes: Stroke[] } }
-  | { type: 'tool.change'; payload: ToolState };
+  | { type: 'tool.change'; payload: ToolState }
+  // 背景主题切换(教师端切换,广播给全员)
+  | { type: 'theme.change'; payload: { theme: WhiteboardTheme } };
 
 // ---- 弹幕 / 互动 ----
 
@@ -134,5 +161,7 @@ export type InteractionEvent =
 export interface WhiteboardSnapshot {
   roomCode: string;
   strokes: Stroke[];
+  images: ImageItem[];
+  theme: WhiteboardTheme;
   nextSeq: number;
 }

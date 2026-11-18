@@ -7,8 +7,40 @@
   "scripts": {
     "dev": "node ../../scripts/dev-electron.mjs",
     "build": "electron-vite build",
+    "build:win": "electron-vite build && electron-builder --win nsis",
     "preview": "electron-vite preview",
     "lint": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "com.c30.teacher",
+    "productName": "C30教师端",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*"
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "C30教师端"
+    }
   },
   "dependencies": {
     "@c30/mdsd": "workspace:*",
@@ -19,6 +51,7 @@
     "normalize.css": "^8.0.1",
     "socket.io": "^4.8.4",
     "socket.io-client": "^4.8.4",
+    "uiohook-napi": "1.5.5",
     "utf-8-validate": "^6.0.6"
   },
   "devDependencies": {
@@ -26,6 +59,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.0",
     "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

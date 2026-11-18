@@ -1,91 +1,47 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { User, SessionMember } from '@c30/shared';
+import type { SessionMember, User } from '@c30/shared';
 import { io, type Socket } from 'socket.io-client';
 import FloatingDock, { TopStatusBar } from './FloatingDock';
 import Whiteboard from './Whiteboard';
+import usePointerPassthrough from '../hooks/usePointerPassthrough';
 
-const SOCKET_URL = 'http://127.0.0.1:3000';
-
-interface TeacherEndpoint {
+// 房间信息(来自 mDNS 发现)
+interface RoomInfo {
   roomCode: string;
   teacherName: string;
   host: string;
   port: number;
 }
 
-// 学生端主界面:类 Dock 左侧导航 + 右侧内容区
-export default function StudentWorkspace({
-  user,
-  onLogout,
-}: {
-  user: User;
-  onLogout: () => void;
-}) {
-  const [active, setActive] = useState('class');
+// 接收端(学生端)极简模式:无登录,启动即搜索局域网课堂 → 选择进入 → 跟随接收发送端画面。
+export default function StudentWorkspace() {
   const [socket, setSocket] = useState<Socket | null>(null);
-  const [joined, setJoined] = useState(false);
   const [roomCode, setRoomCode] = useState('');
-  const [inputCode, setInputCode] = useState('');
-  const [error, setError] = useState('');
+  const [joined, setJoined] = useState(false);
   const [members, setMembers] = useState<SessionMember[]>([]);
+  const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [selectedRoom, setSelectedRoom] = useState<RoomInfo | null>(null);
+  const [status, setStatus] = useState<'searching' | 'connecting' | 'joined' | 'error'>('searching');
+  const [error, setError] = useState('');
+
   const socketRef = useRef<Socket | null>(null);
-  // 局域网发现的教师端(双轨连接:优先直连,回退中心服务器)
-  const teacherEndpointRef = useRef<TeacherEndpoint | null>(null);
-  const [connMode, setConnMode] = useState<'direct' | 'relay' | ''>('');
+  const identityRef = useRef<User | null>(null);
 
-  // 订阅局域网发现结果(主进程 mDNS → IPC → renderer)
+  // 鼠标穿透:接收端跟随画面(进入后)时锁定全屏,其余场景穿透桌面
+  usePointerPassthrough(status === 'joined');
+
+  // 生成匿名学生身份
   useEffect(() => {
-    const api = (window as any).api?.discovery;
-    if (!api) return;
-    // 拉取已发现的结果
-    api.getTeacher?.().then((info: TeacherEndpoint | null) => {
-      if (info) teacherEndpointRef.current = info;
-    });
-    // 订阅后续发现
-    const off = api.onFound?.((info: TeacherEndpoint) => {
-      teacherEndpointRef.current = info;
-    });
-    return off;
+    const id = `student-${Math.random().toString(36).slice(2, 10)}`;
+    identityRef.current = { id, username: id, name: '学生', role: 'STUDENT' };
   }, []);
 
-  const connectSocket = useCallback(() => {
-    if (socketRef.current) return socketRef.current;
-
-    // 双轨:优先直连教师端内嵌 server,失败回退中心服务器
-    const endpoint = teacherEndpointRef.current;
-    const targetUrl =
-      endpoint && endpoint.host && endpoint.port
-        ? `http://${endpoint.host}:${endpoint.port}`
-        : SOCKET_URL;
-
-    const s = io(targetUrl, { transports: ['websocket', 'polling'] });
-
-    // 若直连失败且还有回退余地,自动切换中心服务器
-    s.on('connect_error', () => {
-      if (targetUrl !== SOCKET_URL && !s.connected) {
-        console.log(`[conn] 直连 ${targetUrl} 失败,回退中心服务器`);
-        socketRef.current = null;
-        setConnMode('relay');
-        const fallback = io(SOCKET_URL, { transports: ['websocket', 'polling'] });
-        socketRef.current = fallback;
-        setSocket(fallback);
-        bindEvents(fallback);
-      }
-    });
-
-    socketRef.current = s;
-    setSocket(s);
-    setConnMode(targetUrl === SOCKET_URL ? 'relay' : 'direct');
-    bindEvents(s);
-    return s;
-  }, []);
-
-  // 统一事件绑定
   const bindEvents = useCallback((s: Socket) => {
     s.on('session.joined', (d: { roomCode: string; members: SessionMember[] }) => {
       setRoomCode(d.roomCode);
       setMembers(d.members);
       setJoined(true);
+      setStatus('joined');
       setError('');
     });
     s.on('session.memberJoin', (d: { member: SessionMember }) => {
@@ -94,241 +50,214 @@ export default function StudentWorkspace({
     s.on('session.memberLeave', (d: { userId: string }) => {
       setMembers((prev) => prev.filter((m) => m.userId !== d.userId));
     });
+    s.on('session.members', (d: { members: SessionMember[] }) => {
+      setMembers(d.members);
+    });
     s.on('session.error', (d: { message: string }) => {
       setError(d.message);
+      setStatus('error');
       setJoined(false);
     });
   }, []);
 
-  const joinSession = useCallback(() => {
-    const code = inputCode.trim().toUpperCase();
-    if (!code) {
-      setError('请输入课堂码');
-      return;
-    }
-    const s = connectSocket();
-    s.emit('session.join', {
-      payload: { roomCode: code, userId: user.id, name: user.name },
-    });
-  }, [inputCode, connectSocket, user]);
+  // 直连指定房间(纯局域网,无中继)
+  const joinRoom = useCallback(
+    (room: RoomInfo) => {
+      if (socketRef.current) socketRef.current.disconnect();
+      setSelectedRoom(room);
+      setStatus('connecting');
+      setError('');
 
-  // 进入课堂/白板 tab 时确保 socket 连接
+      const url = `http://${room.host}:${room.port}`;
+      const s = io(url, { transports: ['websocket', 'polling'] });
+
+      s.on('connect', () => {
+        const identity = identityRef.current;
+        if (identity) {
+          s.emit('session.join', {
+            payload: { roomCode: room.roomCode, userId: identity.id, name: identity.name },
+          });
+        }
+      });
+
+      s.on('connect_error', () => {
+        setStatus('error');
+        setError('无法连接到该课堂,请确认发送端在线且网络可达');
+      });
+
+      socketRef.current = s;
+      setSocket(s);
+      bindEvents(s);
+    },
+    [bindEvents],
+  );
+
+  // 订阅局域网发现 → 收集房间列表
   useEffect(() => {
-    if (active === 'class' || active === 'whiteboard') {
-      if (!socketRef.current) connectSocket();
-    }
-  }, [active, connectSocket]);
+    const api = (window as any).api?.discovery;
+    if (!api) return;
 
-  return (
-    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none' }}>
-      {/* 白板全屏透明(跟随教师) */}
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: active === 'whiteboard' ? 'auto' : 'none' }}>
-        {active === 'whiteboard' && (
-          joined ? (
-            <Whiteboard socket={socket} roomCode={roomCode} isTeacher={false} />
-          ) : (
-            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <div style={{ background: 'rgba(255,255,255,0.9)', padding: '24px 32px', borderRadius: 12, textAlign: 'center', color: '#6b7280', fontSize: 14 }}>
-                请先通过「上课」加入课堂
-              </div>
-            </div>
-          )
-        )}
-      </div>
+    // 拉取已发现的房间
+    api.getRooms?.().then((list: RoomInfo[]) => {
+      if (list && list.length > 0) setRooms(list);
+    });
 
-      {/* 课堂(加入/成员)居中悬浮面板 */}
-      {active === 'class' && (
-        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', pointerEvents: 'auto' }}>
-          {!joined ? (
-            <JoinPanel inputCode={inputCode} setInputCode={setInputCode} onJoin={joinSession} error={error} />
-          ) : (
-            <MemberPanel roomCode={roomCode} members={members} />
-          )}
+    // 订阅后续发现(去重合并)
+    const off = api.onFound?.((info: RoomInfo) => {
+      setRooms((prev) => (prev.some((r) => r.roomCode === info.roomCode) ? prev : [...prev, info]));
+    });
+    return off;
+  }, []);
+
+  // 退出课堂,回到房间列表
+  const leave = useCallback(() => {
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    setSocket(null);
+    setJoined(false);
+    setSelectedRoom(null);
+    setStatus('searching');
+    setMembers([]);
+    setRoomCode('');
+  }, []);
+
+  // 已加入 → 全屏跟随画面
+  if (joined) {
+    return (
+      <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none' }}>
+        <div data-interactive style={{ position: 'absolute', inset: 0, pointerEvents: 'auto' }}>
+          <Whiteboard socket={socket} roomCode={roomCode} isTeacher={false} />
         </div>
-      )}
-
-      {/* 课件悬浮面板 */}
-      {active === 'courseware' && (
-        <div
-          style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%,-50%)',
-            pointerEvents: 'auto',
-            background: '#fff',
-            borderRadius: 14,
-            padding: '32px 40px',
-            boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
-            color: '#9aa1ac',
-            fontSize: 14,
-          }}
-        >
-          课件跟随即将上线
-        </div>
-      )}
-
-      {/* 右侧竖条导航 */}
-      <div style={{ position: 'absolute', top: '50%', right: 12, transform: 'translateY(-50%)', pointerEvents: 'auto' }}>
         <FloatingDock
           role="STUDENT"
-          active={active}
-          onChange={setActive}
-          user={user}
-          onLogout={onLogout}
+          active="whiteboard"
+          onChange={() => {}}
+          user={identityRef.current ?? { id: '', username: '', name: '学生', role: 'STUDENT' }}
+          onLogout={leave}
           memberCount={members.length}
-          networkStatus={connMode}
+          networkStatus="direct"
         />
-      </div>
-
-      {/* 右上角信息面板 */}
-      <div style={{ position: 'absolute', top: 12, right: 12, pointerEvents: 'auto' }}>
-        <TopStatusBar networkStatus={connMode} memberCount={members.length} />
-      </div>
-    </div>
-  );
-}
-
-function JoinPanel({
-  inputCode,
-  setInputCode,
-  onJoin,
-  error,
-}: {
-  inputCode: string;
-  setInputCode: (v: string) => void;
-  onJoin: () => void;
-  error: string;
-}) {
-  return (
-    <div
-      style={{
-        width: 360,
-        background: '#fff',
-        borderRadius: 14,
-        border: '1px solid #eef0f3',
-        padding: 32,
-        boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
-      }}
-    >
-        <div style={{ fontSize: 18, fontWeight: 600, color: '#1f2937', marginBottom: 6 }}>
-          加入课堂
+        <div style={{ position: 'fixed', top: 12, right: 12, pointerEvents: 'auto' }}>
+          <TopStatusBar networkStatus="direct" memberCount={members.length} />
         </div>
+      </div>
+    );
+  }
+
+  // 未加入 → 房间选择界面(居中悬浮面板)
+  return (
+    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none' }}>
+      <div
+        data-interactive
+        style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%,-50%)',
+          pointerEvents: 'auto',
+          width: 420,
+          background: '#ffffff',
+          borderRadius: 16,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
+          padding: '28px 28px',
+          color: '#1f2937',
+        }}
+      >
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>选择课堂</div>
         <div style={{ fontSize: 13, color: '#9aa1ac', marginBottom: 20 }}>
-          输入教师提供的课堂码,即可进入课堂
+          已发现局域网内的课堂,点击进入即可跟随画面
         </div>
-        <input
-          value={inputCode}
-          onChange={(e) => setInputCode(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && onJoin()}
-          placeholder="请输入 6 位课堂码"
-          maxLength={6}
-          style={{
-            width: '100%',
-            padding: '12px 14px',
-            border: '1.5px solid #d5d9e0',
-            borderRadius: 8,
-            fontSize: 16,
-            letterSpacing: 2,
-            textTransform: 'uppercase',
-            outline: 'none',
-            boxSizing: 'border-box',
-          }}
-        />
-        {error && (
-          <div style={{ fontSize: 12, color: '#e5484d', marginTop: 8 }}>{error}</div>
-        )}
-        <button
-          onClick={onJoin}
-          style={{
-            width: '100%',
-            marginTop: 20,
-            padding: '12px',
-            border: 'none',
-            borderRadius: 8,
-            background: '#2563eb',
-            color: '#fff',
-            fontSize: 14,
-            fontWeight: 600,
-            cursor: 'pointer',
-          }}
-        >
-          加入
-        </button>
-    </div>
-  );
-}
 
-function MemberPanel({
-  roomCode,
-  members,
-}: {
-  roomCode: string;
-  members: SessionMember[];
-}) {
-  return (
-    <div
-      style={{
-        width: 420,
-        maxHeight: '70vh',
-        overflow: 'auto',
-        background: '#fff',
-        borderRadius: 14,
-        border: '1px solid #eef0f3',
-        padding: 24,
-        boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
-      }}
-    >
-        <div style={{ fontSize: 16, fontWeight: 600, color: '#1f2937', marginBottom: 16 }}>
-          课堂 {roomCode}
-        </div>
-        <div style={{ fontSize: 13, color: '#7c8494', marginBottom: 10 }}>
-          在线成员({members.length})
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {members.map((m) => (
-            <div
-              key={m.userId}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                padding: '10px 12px',
-                background: '#f8f9fb',
-                borderRadius: 8,
-              }}
-            >
-              <div
+        {status === 'connecting' ? (
+          <div style={{ padding: '32px 0', textAlign: 'center', color: '#6b7280' }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937', marginBottom: 8 }}>正在接入课堂…</div>
+            <div style={{ fontSize: 13, color: '#9aa1ac' }}>{selectedRoom?.teacherName || ''}</div>
+          </div>
+        ) : rooms.length === 0 ? (
+          <div style={{ padding: '32px 0', textAlign: 'center', color: '#9aa1ac' }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937', marginBottom: 8 }}>正在搜索课堂…</div>
+            <div style={{ fontSize: 13 }}>
+              {error || '请确认发送端已开启,并与本机处于同一局域网'}
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {rooms.map((room) => (
+              <button
+                key={room.roomCode}
+                onClick={() => joinRoom(room)}
                 style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  background: m.role === 'TEACHER' ? '#2563eb' : '#16a34a',
-                  color: '#fff',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 14,
-                  fontWeight: 600,
+                  gap: 12,
+                  padding: '14px 16px',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: 12,
+                  background: '#fff',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  outline: 'none',
+                  transition: 'all .15s ease',
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = '#2563eb';
+                  (e.currentTarget as HTMLButtonElement).style.background = '#f5f8ff';
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = '#e5e7eb';
+                  (e.currentTarget as HTMLButtonElement).style.background = '#fff';
                 }}
               >
-                {m.name.charAt(0)}
-              </div>
-              <span style={{ fontSize: 13, color: '#1f2937' }}>{m.name}</span>
-              <span
-                style={{
-                  fontSize: 11,
-                  color: m.role === 'TEACHER' ? '#2563eb' : '#16a34a',
-                  background: m.role === 'TEACHER' ? '#eaf1ff' : '#e8f7ee',
-                  padding: '2px 8px',
-                  borderRadius: 8,
-                }}
-              >
-                {m.role === 'TEACHER' ? '教师' : '学生'}
-              </span>
-            </div>
-          ))}
-        </div>
+                <div
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: '50%',
+                    background: '#2563eb',
+                    color: '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 16,
+                    fontWeight: 700,
+                    flexShrink: 0,
+                  }}
+                >
+                  {room.teacherName.charAt(0) || '课'}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 15, fontWeight: 600 }}>{room.teacherName}的课堂</div>
+                  <div style={{ fontSize: 12, color: '#9aa1ac', marginTop: 2 }}>房间号 {room.roomCode}</div>
+                </div>
+                <div style={{ fontSize: 12, color: '#2563eb', fontWeight: 600 }}>进入</div>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {status === 'error' && (
+          <button
+            onClick={() => {
+              setStatus('searching');
+              setError('');
+              setSelectedRoom(null);
+            }}
+            style={{
+              width: '100%',
+              padding: '10px',
+              marginTop: 16,
+              border: 'none',
+              borderRadius: 8,
+              background: '#eef2ff',
+              color: '#2563eb',
+              fontSize: 14,
+              cursor: 'pointer',
+            }}
+          >
+            返回重新选择
+          </button>
+        )}
+      </div>
     </div>
   );
 }

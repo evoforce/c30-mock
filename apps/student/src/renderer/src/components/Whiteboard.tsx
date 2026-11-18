@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import type { CSSProperties } from 'react';
 import type { Socket } from 'socket.io-client';
 import type {
   Stroke,
@@ -8,6 +9,8 @@ import type {
   SessionMember,
   Danmaku,
   InteractionControl,
+  ImageItem,
+  WhiteboardTheme,
 } from '@c30/shared';
 import { PEN_DEFAULT_OPACITY } from '@c30/shared';
 import { CanvasRenderer } from './Renderer';
@@ -21,6 +24,40 @@ const COLORS = [
   '#1f2937', '#e5484d', '#2563eb', '#16a34a',
   '#f59e0b', '#7c3aed', '#ec4899', '#ffffff',
 ];
+
+// 根据主题计算画布背景样式(纯色或带网格/点阵/田字格纹理)
+function backgroundFor(theme: WhiteboardTheme): CSSProperties {
+  switch (theme) {
+    case 'blackboard':
+      return { backgroundColor: '#1e3a2f' };
+    case 'white':
+      return { backgroundColor: '#ffffff' };
+    case 'green':
+      return { backgroundColor: '#2e7d32' };
+    case 'dot':
+      return {
+        backgroundColor: '#ffffff',
+        backgroundImage: 'radial-gradient(circle, #cbd5e1 1px, transparent 1px)',
+        backgroundSize: '24px 24px',
+      };
+    case 'pinyin':
+      return {
+        backgroundColor: '#f7f1e1',
+        backgroundImage:
+          'linear-gradient(to right, #4ade80 1px, transparent 1px), linear-gradient(to bottom, #4ade80 1px, transparent 1px)',
+        backgroundSize: '120px 80px',
+      };
+    case 'grid':
+      return {
+        backgroundColor: '#f7f1e1',
+        backgroundImage:
+          'linear-gradient(to right, #16a34a 1px, transparent 1px), linear-gradient(to bottom, #16a34a 1px, transparent 1px)',
+        backgroundSize: '80px 80px',
+      };
+    default:
+      return { backgroundColor: '#ffffff' };
+  }
+}
 
 interface Props {
   socket: Socket | null;
@@ -47,6 +84,9 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
   const seqRef = useRef(0);
   // 记录当前实时绘制中已发送的点数(用于只发增量)
   const sentCountRef = useRef(0);
+  // 图片元素(聚焦「插入白板」等场景)
+  const imagesRef = useRef<ImageItem[]>([]);
+  const [images, setImages] = useState<ImageItem[]>([]);
 
   const undoStackRef = useRef<DrawOp[]>([]);
   const redoStackRef = useRef<DrawOp[]>([]);
@@ -73,6 +113,9 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
     danmakuEnabled: true,
     quizEnabled: true,
   });
+
+  // 白板背景主题(跟随教师端)
+  const [theme, setTheme] = useState<WhiteboardTheme>('white');
 
   // 学生端:实时绘制中的笔画(按 id 累积增量点)
   const liveStrokesRef = useRef<Map<string, Stroke>>(new Map());
@@ -324,8 +367,11 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
   useEffect(() => {
     if (!socket) return;
 
-    const onWbState = (snap: { roomCode: string; strokes: Stroke[]; nextSeq: number }) => {
+    const onWbState = (snap: { roomCode: string; strokes: Stroke[]; images?: ImageItem[]; theme?: WhiteboardTheme; nextSeq: number }) => {
       strokesRef.current = [...snap.strokes];
+      imagesRef.current = snap.images ? [...snap.images] : [];
+      setImages(imagesRef.current);
+      if (snap.theme) setTheme(snap.theme);
       seqRef.current = snap.nextSeq;
       liveStrokesRef.current.clear();
       redrawAll();
@@ -375,6 +421,16 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
         strokesRef.current = [];
         liveStrokesRef.current.clear();
         redrawAll();
+      } else if (event.type === 'image.append') {
+        const img = event.payload;
+        if (!imagesRef.current.some((x) => x.id === img.id)) {
+          imagesRef.current.push(img);
+        }
+        setImages([...imagesRef.current]);
+      } else if (event.type === 'image.remove') {
+        const ids = event.payload.imageIds;
+        imagesRef.current = imagesRef.current.filter((im) => !ids.includes(im.id));
+        setImages([...imagesRef.current]);
       } else if (event.type === 'undo') {
         const { removedStrokeIds, restoredStrokes } = event.payload;
         if (removedStrokeIds.length > 0) {
@@ -386,6 +442,8 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
           }
         }
         redrawAll();
+      } else if (event.type === 'theme.change') {
+        setTheme(event.payload.theme);
       }
     };
 
@@ -452,7 +510,7 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#ffffff' }}>
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', ...backgroundFor(theme) }}>
         <canvas
           ref={canvasRef}
           onPointerDown={onPointerDown}
@@ -470,6 +528,26 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
             touchAction: 'none',
           }}
         />
+
+        {/* 图片元素(聚焦「插入白板」):叠加在 canvas 之上 */}
+        {images.map((img) => (
+          <img
+            key={img.id}
+            src={img.src}
+            alt=""
+            draggable={false}
+            style={{
+              position: 'absolute',
+              left: img.x,
+              top: img.y,
+              width: img.w,
+              height: img.h,
+              objectFit: 'contain',
+              pointerEvents: 'none',
+              userSelect: 'none',
+            }}
+          />
+        ))}
 
         <DanmakuLayer danmakuList={danmakuList} />
 

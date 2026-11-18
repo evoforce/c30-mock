@@ -2,37 +2,36 @@
 
 仿照教培软件 **C30 教师端/学生端** 的局域网互动教学系统。
 
-## 核心功能(当前阶段)
+## 核心功能(当前阶段 · 首期 Demo)
 
-1. **登录** — Mock 账号 + JWT
-2. **课件** — 上传/列表/渲染/翻页
-3. **白板** — 笔(毛笔/钢笔/铅笔)、颜色、白板擦、黑板擦大小、撤回
+首期 demo 聚焦「**2 个客户端、无后端**」：一个**发送端**(教师端,讲课时操作)、一个**接收端**(学生端,接收课堂画面)。
+
+- **发送端(教师端)**：启动即创建课堂 → mDNS 广播 → 在桌面/白板上书写(画笔/板擦/选择)。
+- **接收端(学生端)**：启动即搜索局域网内的课堂 → 选择进入 → 实时跟随接收发送端的画面状态(白板笔迹等)。
+- **局域网直连**：发送端内嵌 socket.io 服务,接收端通过 mDNS 发现后直连,全程不依赖中心服务器。
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
 | 客户端壳 | Electron |
-| UI | React 18 + shadcn/ui + Tailwind |
-| 后端 | NestJS |
+| UI | React 18 + lucide-react |
+| 局域网发现 | mDNS |
+| 实时同步 | socket.io(发送端内嵌服务) |
 | 白板核心 | C++(N-API)+ Canvas 兜底 |
-| 局域网发现 | mDNS + 手动 IP 兜底 |
-| 基础设施 | PostgreSQL、MinIO、Redis |
 | 仓库 | monorepo + pnpm workspace + turbo |
-| 部署 | docker-compose |
 | 版本管理 | Changesets |
 
 ## 目录结构
 
 ```
 apps/
-  server/             # NestJS 后端
-  teacher/            # 教师端 Electron
-  student/            # 学生端 Electron
+  teacher/            # 发送端(教师端) Electron
+  student/            # 接收端(学生端) Electron
   whiteboard-native/  # C++ 白板核心
 packages/
   shared/             # 共享类型 / 协议
-  ui/                 # 共享 shadcn 组件
+  ui/                 # 共享组件
   mdsd/               # mDNS 封装
 docs/
   whiteboard-design.md  # 白板设计
@@ -44,13 +43,14 @@ docs/
 # 安装依赖
 pnpm install
 
-# 启动后端
-pnpm --filter server dev
-
-# 启动教师端 / 学生端
+# 先启动发送端(教师端),创建课堂并广播
 pnpm --filter teacher dev
+
+# 再启动接收端(学生端),自动发现并接入
 pnpm --filter student dev
 ```
+
+> 注意:接收端需与发送端在同一局域网内才能通过 mDNS 自动发现。
 
 ## 设计文档
 
