@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { User, SessionMember } from '@c30/shared';
 import { io, type Socket } from 'socket.io-client';
 import FloatingDock, { TopStatusBar, BottomToolbar } from './FloatingDock';
-import Whiteboard from './Whiteboard';
+import Whiteboard, { type WhiteboardHandle } from './Whiteboard';
 import DesktopDrawLayer, { type DesktopDrawHandle } from './DesktopDrawLayer';
 import SpotlightLayer, { type Rect } from './SpotlightLayer';
 import type { PenConfig } from './PenPanel';
@@ -31,6 +31,8 @@ export default function TeacherWorkspace({
     strokeWidth: 1,
   });
   const drawLayerRef = useRef<DesktopDrawHandle>(null);
+  // 白板操作句柄:白板模式下,底部工具条的撤销/重做/清空路由到白板内部
+  const whiteboardRef = useRef<WhiteboardHandle>(null);
 
   // 教师端本地设置(开机自启/展示教室信息/允许互动),从主进程加载并持久化
   const [appSettings, setAppSettings] = useState({
@@ -148,7 +150,7 @@ export default function TeacherWorkspace({
       {/* 白板全屏(唯一的功能界面) */}
       {active === 'whiteboard' && (
         <div data-interactive style={{ position: 'absolute', inset: 0, pointerEvents: 'auto' }}>
-          <Whiteboard socket={socket} roomCode={roomCode} isTeacher activeTool={activeTool} penConfig={penConfig} onExit={() => setActive('')} />
+          <Whiteboard ref={whiteboardRef} socket={socket} roomCode={roomCode} isTeacher activeTool={activeTool} penConfig={penConfig} onExit={() => setActive('')} />
         </div>
       )}
 
@@ -179,9 +181,15 @@ export default function TeacherWorkspace({
         onToolChange={setActiveTool}
         penConfig={penConfig}
         onPenConfigChange={setPenConfig}
-        onUndo={() => drawLayerRef.current?.undo()}
-        onRedo={() => drawLayerRef.current?.redo()}
-        onClear={() => drawLayerRef.current?.clear()}
+        onUndo={() =>
+          active === 'whiteboard' ? whiteboardRef.current?.undo() : drawLayerRef.current?.undo()
+        }
+        onRedo={() =>
+          active === 'whiteboard' ? whiteboardRef.current?.redo() : drawLayerRef.current?.redo()
+        }
+        onClear={() =>
+          active === 'whiteboard' ? whiteboardRef.current?.clear() : drawLayerRef.current?.clear()
+        }
         onComplete={() => setActiveTool('select')}
         allowInteraction={appSettings.allowInteraction}
       />
@@ -233,9 +241,12 @@ export default function TeacherWorkspace({
           }}
           onSave={async (rect: Rect) => {
             const spotlightApi = (window as any).api?.spotlight;
-            const res = await spotlightApi?.save(rect);
-            // 保存完成后关闭聚焦层(回到选择工具)
+            if (!spotlightApi) return;
+            // 先退出聚焦层:卸载矩形选中框 + 恢复鼠标穿透,避免挡住原生「另存为」对话框
             setActiveTool('select');
+            // 等两帧,确保聚焦层卸载、穿透状态同步到主进程后再弹框
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            const res = await spotlightApi.save(rect);
             if (res && !res.ok && !res.canceled) {
               console.warn('[spotlight] 保存失败:', res.error);
             }

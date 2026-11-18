@@ -418,6 +418,30 @@ async function captureScreenRect(rect: SpotlightRect, hideWindow = true): Promis
   }
 }
 
+// 隐藏悬浮窗口(等待 DWM 合成器移除画面),用于弹原生对话框前避开 alwaysOnTop 遮挡。
+// 同时解除置顶 + 恢复鼠标穿透:即使窗口未能完全隐藏,也不再盖住/挡住原生对话框。
+async function hideFloatingWindow(): Promise<void> {
+  if (!mainWindow) return;
+  try {
+    mainWindow.setAlwaysOnTop(false);
+  } catch { /* ignore */ }
+  mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  mainWindow.hide();
+  await new Promise((r) => setTimeout(r, 120));
+}
+
+// 恢复悬浮窗口显示(不激活、不抢前台焦点,保持 focusable:false)
+function restoreFloatingWindow(): void {
+  if (!mainWindow) return;
+  if (!mainWindow.isVisible()) {
+    mainWindow.showInactive();
+  }
+  mainWindow.setFocusable(false);
+  try {
+    mainWindow.setAlwaysOnTop(true, 'floating');
+  } catch { /* ignore */ }
+}
+
 function registerSpotlightControl(): void {
   // 截屏返回 dataURL(供插入白板/放大镜)
   ipcMain.handle('spotlight:capture', async (_e, rect: SpotlightRect, opts?: { hideWindow?: boolean }) => {
@@ -427,22 +451,36 @@ function registerSpotlightControl(): void {
   // 保存到文件(弹出保存对话框)
   ipcMain.handle('spotlight:save', async (_e, rect: SpotlightRect) => {
     try {
-      // 先弹保存对话框,确认后再截屏:避免「先截屏(hide/show 窗口)→ 再弹框」导致
-      // 悬浮窗口在截屏后 showInactive 恢复、聚焦框「闪回」又重新出现的现象。
+      // 弹保存对话框前先隐藏悬浮窗口:悬浮层 alwaysOnTop(floating)+ 聚焦层全屏捕获鼠标,
+      // 若不隐藏会盖住/挡住原生「另存为」对话框,导致矩形选中框仍在、弹框无法点击。
       // 不传 mainWindow 作 parent:悬浮窗口 focusable:false + type:'toolbar',
       // 作为模态对话框父窗口时会导致对话框无法弹出(保存点击无反应)。
+      await hideFloatingWindow();
+
       const { canceled, filePath } = await dialog.showSaveDialog({
         title: '保存聚焦内容',
         defaultPath: `聚焦_${Date.now()}.png`,
         filters: [{ name: 'PNG 图片', extensions: ['png'] }],
       });
-      if (canceled || !filePath) return { ok: false, canceled: true };
-      const dataUrl = await captureScreenRect(rect);
-      if (!dataUrl) return { ok: false, error: '截屏失败' };
+      if (canceled || !filePath) {
+        restoreFloatingWindow();
+        return { ok: false, canceled: true };
+      }
+
+      // 对话框确认后截屏:窗口已由 hideFloatingWindow 隐藏,直接截取干净画面
+      // (hideWindow=false,避免重复 hide/show 导致闪回)
+      const dataUrl = await captureScreenRect(rect, false);
+      if (!dataUrl) {
+        restoreFloatingWindow();
+        return { ok: false, error: '截屏失败' };
+      }
+      // 截图完成后恢复窗口(渲染层已在弹框前退出聚焦层,恢复后即为正常选择态)
+      restoreFloatingWindow();
       const base64 = dataUrl.split(',')[1];
       await writeFile(filePath, Buffer.from(base64, 'base64'));
       return { ok: true, filePath };
     } catch (err) {
+      restoreFloatingWindow();
       return { ok: false, error: (err as Error)?.message ?? String(err) };
     }
   });
@@ -455,15 +493,97 @@ interface WinItem {
   id: string;
   hwnd: number;
   title: string;
-  thumbnail: string; // dataURL 缩略图
+  thumbnail: string; // dataURL 缩略图(最小化窗口为空,由前端占位)
+  minimized?: boolean; // 是否最小化(任务栏替代需一并展示最小化窗口)
 }
 
-// 枚举系统可见的应用窗口(过滤掉自身悬浮窗 / 空标题 / 无意义系统窗口)
+// 枚举系统所有顶层窗口(含最小化窗口)。desktopCapturer 只返回「可捕获画面」的可见窗口,
+// 最小化窗口会被漏掉,无法充当任务栏;这里改用 user32 EnumWindows(经 PowerShell P/Invoke),
+// 与「聚焦/回到桌面」保持一致,从而拿到完整的任务栏级窗口列表。
+interface NativeWindow {
+  hwnd: number;
+  title: string;
+  minimized: boolean;
+}
+
+function enumerateAllWindows(): Promise<NativeWindow[]> {
+  return new Promise((resolve) => {
+    const ps = `
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class WinList {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
+}
+"@
+$items = New-Object System.Collections.Generic.List[object]
+$cb = [WinList+EnumWindowsProc]{
+  param($h, $l)
+  # 只保留可见顶层窗口(最小化窗口 IsWindowVisible 仍为 true,不会被漏掉)
+  if (-not [WinList]::IsWindowVisible($h)) { return $true }
+  $len = [WinList]::GetWindowTextLength($h)
+  if ($len -le 0) { return $true }
+  $sb = New-Object System.Text.StringBuilder ($len + 1)
+  [void][WinList]::GetWindowText($h, $sb, $len + 1)
+  $title = $sb.ToString()
+  if ([string]::IsNullOrWhiteSpace($title)) { return $true }
+  $items.Add([pscustomobject]@{ hwnd = $h.ToInt64(); title = $title; minimized = [WinList]::IsIconic($h) })
+  return $true
+}
+[void][WinList]::EnumWindows($cb, [IntPtr]::Zero)
+$items | ConvertTo-Json -Compress
+`;
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
+      { windowsHide: true, timeout: 8000 },
+      (err, stdout) => {
+        if (err) {
+          console.warn('[windows] EnumWindows 枚举失败:', (err as Error)?.message ?? String(err));
+          resolve([]);
+          return;
+        }
+        const raw = (stdout || '').trim();
+        if (!raw) {
+          resolve([]);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(raw);
+          const arr: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+          const result: NativeWindow[] = [];
+          for (const it of arr) {
+            const o = it as { hwnd?: unknown; title?: unknown; minimized?: unknown };
+            const hwnd = Number(o?.hwnd);
+            const title = String(o?.title ?? '').trim();
+            if (!hwnd || !title) continue;
+            result.push({ hwnd, title, minimized: Boolean(o?.minimized) });
+          }
+          resolve(result);
+        } catch (e) {
+          console.warn('[windows] 解析窗口列表失败:', (e as Error)?.message ?? String(e), 'raw =', raw.slice(0, 200));
+          resolve([]);
+        }
+      },
+    );
+  });
+}
+
+// 生成「窗口」面板列表:完整枚举(含最小化) + desktopCapturer 缩略图(仅可见窗口有)。
 async function listSystemWindows(): Promise<WinItem[]> {
   try {
+    // 1) 枚举所有顶层窗口(含最小化),按 Z 序排列,最小化窗口靠后但不会消失
+    const all = await enumerateAllWindows();
+
+    // 2) desktopCapturer 仅用于补可见窗口的缩略图(按 HWND 匹配),最小化窗口无缩略图由前端占位
     const display = screen.getPrimaryDisplay();
     const sf = display.scaleFactor || 1;
-    // 缩略图按列表卡片尺寸裁(宽 ~160 物理像素)
     const thumbW = Math.round(160 * sf);
     const thumbH = Math.round(100 * sf);
     const sources = await desktopCapturer.getSources({
@@ -471,39 +591,33 @@ async function listSystemWindows(): Promise<WinItem[]> {
       thumbnailSize: { width: thumbW, height: thumbH },
       fetchWindowIcons: false,
     });
-    // [debug] 打印枚举到的原始窗口数量与标题,定位「读不到窗口」的断点
-    console.log('[windows] getSources 返回', sources.length, '个窗口源');
-    for (const s of sources) {
-      console.log('[windows] 源:', JSON.stringify({ id: s.id, name: s.name, app: (s as any).appIcon, empty: s.thumbnail.isEmpty() }));
-    }
-    const selfBounds = mainWindow?.getBounds();
-    // 自身悬浮窗的 mediaSourceId(精确过滤,不依赖标题匹配)
-    const selfId = mainWindow ? mainWindow.webContents.getMediaSourceId(mainWindow.webContents) : undefined;
-    console.log('[windows] selfId =', selfId, 'selfTitle =', mainWindow?.getTitle());
-    const result: WinItem[] = [];
+    const thumbByHwnd = new Map<number, string>();
     for (const src of sources) {
-      const title = (src.name || '').trim();
-      // 过滤:空标题、本应用悬浮窗、纯工具窗口(缩略图全透明/极小)
-      if (!title) continue;
-      if (selfId && src.id === selfId) continue;
-      if (selfBounds && title === (mainWindow?.getTitle() || '')) continue;
-      const hwndMatch = /^window:(\d+):/.exec(src.id);
-      if (!hwndMatch) continue;
-      const hwnd = parseInt(hwndMatch[1], 10);
+      const m = /^window:(\d+):/.exec(src.id);
+      if (!m) continue;
+      const hwnd = parseInt(m[1], 10);
       if (!hwnd) continue;
-      // 缩略图为空或过小(任务栏/托盘等系统小窗)时:仍保留窗口,但缩略图置空由前端占位
-      // (此前直接 continue 会导致「缩略图偶发为空」的普通应用窗口被整体丢弃,表现为「读不到窗口」)
-      let thumbnail = '';
       const thumb = src.thumbnail;
-      if (!thumb.isEmpty()) {
-        const size = thumb.getSize();
-        if (size.width >= 8 && size.height >= 8) {
-          thumbnail = thumb.toDataURL();
-        }
-      }
-      result.push({ id: src.id, hwnd, title, thumbnail });
+      if (thumb.isEmpty()) continue;
+      const size = thumb.getSize();
+      if (size.width < 8 || size.height < 8) continue;
+      thumbByHwnd.set(hwnd, thumb.toDataURL());
     }
-    console.log('[windows] 过滤后剩余', result.length, '个窗口');
+
+    // 3) 合并:过滤自身悬浮窗,生成完整列表(含最小化窗口)
+    const selfHwnd = getSelfHwnd();
+    const result: WinItem[] = [];
+    for (const w of all) {
+      if (selfHwnd && w.hwnd === selfHwnd) continue;
+      result.push({
+        id: `window:${w.hwnd}:0`,
+        hwnd: w.hwnd,
+        title: w.title,
+        thumbnail: thumbByHwnd.get(w.hwnd) ?? '',
+        minimized: w.minimized,
+      });
+    }
+    console.log('[windows] 枚举', all.length, '个顶层窗口 → 输出', result.length, '个(其中最小化', result.filter((r) => r.minimized).length, '个)');
     return result;
   } catch (err) {
     console.warn('[windows] 枚举窗口失败:', (err as Error)?.message ?? String(err));

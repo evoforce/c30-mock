@@ -82,7 +82,7 @@ export default function FloatingDock({
   // 窗口面板(点击「窗口」导航项打开):顶部「回到电脑桌面」+ 系统真实窗口列表(代替任务栏)
   const [windowsOpen, setWindowsOpen] = useState(false);
   // 系统窗口列表(标题 + 缩略图 + 句柄)
-  const [winList, setWinList] = useState<{ id: string; hwnd: number; title: string; thumbnail: string }[]>([]);
+  const [winList, setWinList] = useState<{ id: string; hwnd: number; title: string; thumbnail: string; minimized?: boolean }[]>([]);
   const [winLoading, setWinLoading] = useState(false);
   // 展开/贴边方向(左右两端始终各有一个入口:当前侧展开,对侧缩起为箭头)
   const [side, setSide] = useState<'left' | 'right'>('right');
@@ -324,6 +324,7 @@ export default function FloatingDock({
             padding: 20,
             zIndex: 121,
             boxShadow: '0 16px 48px rgba(0,0,0,0.25)',
+            pointerEvents: 'auto',
           }}
         >
             {/* 标题栏 + 关闭叉号 */}
@@ -418,6 +419,7 @@ export default function FloatingDock({
             display: 'flex',
             flexDirection: 'column',
             gap: 10,
+            pointerEvents: 'auto',
           }}
         >
             {/* 标题栏 + 关闭叉号 */}
@@ -594,6 +596,9 @@ export default function FloatingDock({
                   >
                     {w.title}
                   </span>
+                  {w.minimized && (
+                    <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>已最小化</span>
+                  )}
                 </button>
               ))}
             </div>

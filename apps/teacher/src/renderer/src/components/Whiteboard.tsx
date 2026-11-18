@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
 import type { CSSProperties } from 'react';
 import type { Socket } from 'socket.io-client';
 import type {
@@ -124,7 +124,16 @@ interface DrawOp {
   clearedStrokes?: Stroke[];
 }
 
-export default function Whiteboard({ socket, roomCode, isTeacher, onExit, activeTool = 'pen', penConfig }: Props) {
+export interface WhiteboardHandle {
+  undo: () => void;
+  redo: () => void;
+  clear: () => void;
+}
+
+const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
+  { socket, roomCode, isTeacher, onExit, activeTool = 'pen', penConfig },
+  ref,
+) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // 渲染器:CanvasRenderer 实现,未来可换 NativeRenderer(C++)
   const rendererRef = useRef<CanvasRenderer | null>(null);
@@ -334,6 +343,9 @@ export default function Whiteboard({ socket, roomCode, isTeacher, onExit, active
     syncStackState();
     emit({ type: 'undo', payload: { removedStrokeIds, restoredStrokes } });
   };
+
+  // 暴露撤销/重做/清空给外部底部悬浮工具条(白板模式下与桌面批注层统一路由)
+  useImperativeHandle(ref, () => ({ undo, redo, clear: clearAll }), [undo, redo, clearAll]);
 
   // 橡皮擦命中检测(整笔删除降级)
   const eraseAt = (x: number, y: number) => {
@@ -961,7 +973,9 @@ export default function Whiteboard({ socket, roomCode, isTeacher, onExit, active
           白板模式下不再显示重复的白色菜单栏。 */}
     </div>
   );
-}
+});
+
+export default Whiteboard;
 
 // 供工具栏引用颜色
 export { COLORS };

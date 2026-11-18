@@ -68,7 +68,7 @@ const api = {
   windows: {
     // 枚举系统当前打开的窗口(标题 + 缩略图 + 窗口句柄)
     list: (): Promise<
-      { id: string; hwnd: number; title: string; thumbnail: string }[]
+      { id: string; hwnd: number; title: string; thumbnail: string; minimized?: boolean }[]
     > => ipcRenderer.invoke('windows:list'),
     // 把指定窗口提到前台
     activate: (hwnd: number): Promise<{ ok: boolean }> =>
