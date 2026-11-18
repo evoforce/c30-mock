@@ -39,7 +39,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        # 注意:patches/uiohook-napi.patch 改动后 pnpm 的 patch_hash 会变化,
+        # 与已提交的 pnpm-lock.yaml 不一致,故这里不能用 --frozen-lockfile。
+        # 本地跑一次 pnpm install 更新 lockfile 并提交后,可改回 --frozen-lockfile。
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build teacher app
         run: pnpm --filter @c30/teacher build:win
