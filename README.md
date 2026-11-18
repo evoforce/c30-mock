@@ -63,8 +63,9 @@ pnpm --filter student dev
 (不再只留在 Actions Artifacts 里)。
 
 **一键发布(推荐)**:在 Actions 页运行 `Build & Release Windows Installers`(需在 `main` 触发)。
-CI 会执行 `pnpm version-packages` 消费 `.changeset/*.md`(提升版本号 + 生成 CHANGELOG)→ 提交
-`chore(release): vX.Y.Z` 并打 tag → 构建双端安装包 → 用该版本创建 Release;可勾选草稿先预览。
+CI 会执行 `pnpm version-packages` 消费 `.changeset/*.md`(提升版本号 + 生成 CHANGELOG)→ 并行构建
+四份安装包(教师端/学生端 × x64/arm64)→ 提交 `chore(release): vX.Y.Z` 并打 tag → 用该版本创建
+Release;可勾选草稿先预览。
 
 **本地发版(等价路径)**:本地 version 后提交、打 tag 再推送,CI 只做一致性校验
 (tag 必须等于 `package.json` 版本,且不能有未消费的 changeset):
