@@ -30,6 +30,14 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      # 固定 Python 3.11:Python 3.12+ 移除了 distutils,
+      # 而 electron-builder 依赖的 node-gyp 9.4.1 的 gyp 仍 import distutils,
+      # 用默认 Python 会报 "No module named 'distutils'"。node-gyp >= 12 可去掉此步。
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
