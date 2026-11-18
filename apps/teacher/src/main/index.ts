@@ -157,17 +157,32 @@ function diag(msg: string): void {
   appendFile(join(app.getPath('userData'), 'pointer-diag.log'), line).catch(() => {});
 }
 
-// 获取本机局域网 IPv4 地址
+// 获取本机局域网 IPv4 地址(mDNS 广播 / 学生端直连都用它)。
+// 不能简单取「第一个非 internal IPv4」:本机常同时存在 Meta/Clash 的 198.18.0.1、
+// Hyper-V 的 172.22.x、未连接网卡的 169.254.x,取到它们时同局域网的另一台机器
+// (比如 Mac 学生端)根本连不上。这里按真实局域网网段打分,并跳过 APIPA / 198.18/15。
 function getLanIP(): string {
   const nets = networkInterfaces();
+  let best = '';
+  let bestScore = -1;
   for (const name of Object.keys(nets)) {
     for (const net of nets[name] ?? []) {
-      if (net.family === 'IPv4' && !net.internal) {
-        return net.address;
+      if (net.family !== 'IPv4' || net.internal) continue;
+      const addr = net.address;
+      // APIPA(未拿到 DHCP)与 198.18.0.0/15(RFC 2544 基准测试段,常见于 Clash/Meta TUN)
+      if (addr.startsWith('169.254.')) continue;
+      if (/^198\.(18|19)\./.test(addr)) continue;
+      let score = 1;
+      if (addr.startsWith('192.168.')) score = 3; // 家用/办公 Wi-Fi 最常见
+      else if (addr.startsWith('10.')) score = 2;
+      else if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) score = 2;
+      if (score > bestScore) {
+        bestScore = score;
+        best = addr;
       }
     }
   }
-  return '127.0.0.1';
+  return best || '127.0.0.1';
 }
 
 function createWindow(): void {
