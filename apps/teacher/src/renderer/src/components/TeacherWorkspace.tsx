@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { User, SessionMember, ImageItem, EraserMode } from '@c30/shared';
+import type { User, SessionMember, ImageItem } from '@c30/shared';
 import { io, type Socket } from 'socket.io-client';
 import FloatingDock, { TopStatusBar, BottomToolbar } from './FloatingDock';
 import Whiteboard, { type WhiteboardHandle } from './Whiteboard';
 import DesktopDrawLayer, { type DesktopDrawHandle } from './DesktopDrawLayer';
 import SpotlightLayer, { type Rect } from './SpotlightLayer';
 import type { PenConfig } from './PenPanel';
-import { DEFAULT_ERASER_RADIUS, DEFAULT_ERASER_MODE } from './EraserPanel';
+import { DEFAULT_ERASER_RADIUS } from './EraserPanel';
 import usePointerPassthrough from '../hooks/usePointerPassthrough';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
@@ -32,10 +32,9 @@ export default function TeacherWorkspace({
     color: '#e5484d',
     strokeWidth: 1,
   });
-  // 板擦粗细(底部工具条「板擦」菜单调整,桌面批注层与白板共用)
+  // 板擦粗细(底部工具条「板擦」菜单调整,桌面批注层与白板共用)。
+  // 擦除语义固定为「自由擦除」:涂到哪擦到哪,不再有清笔迹/区域擦除的选项。
   const [eraserRadius, setEraserRadius] = useState<number>(DEFAULT_ERASER_RADIUS);
-  // 板擦擦除方式:清笔迹(整条清除)/ 区域擦除(只擦相交部分),白板与桌面批注共用
-  const [eraserMode, setEraserMode] = useState<EraserMode>(DEFAULT_ERASER_MODE);
   // 浮层缩放(提示条等也跟随屏幕尺寸)
   const uiScale = useOverlayScale();
   const drawLayerRef = useRef<DesktopDrawHandle>(null);
@@ -177,7 +176,7 @@ export default function TeacherWorkspace({
       {/* 白板全屏(唯一的功能界面) */}
       {active === 'whiteboard' && (
         <div data-interactive style={{ position: 'absolute', inset: 0, pointerEvents: 'auto' }}>
-          <Whiteboard ref={whiteboardRef} socket={socket} roomCode={roomCode} isTeacher activeTool={activeTool} penConfig={penConfig} eraserRadius={eraserRadius} eraserMode={eraserMode} onExit={() => setActive('')} />
+          <Whiteboard ref={whiteboardRef} socket={socket} roomCode={roomCode} isTeacher activeTool={activeTool} penConfig={penConfig} eraserRadius={eraserRadius} onExit={() => setActive('')} />
         </div>
       )}
 
@@ -210,8 +209,6 @@ export default function TeacherWorkspace({
         onPenConfigChange={setPenConfig}
         eraserRadius={eraserRadius}
         onEraserRadiusChange={setEraserRadius}
-        eraserMode={eraserMode}
-        onEraserModeChange={setEraserMode}
         onUndo={() =>
           active === 'whiteboard' ? whiteboardRef.current?.undo() : drawLayerRef.current?.undo()
         }
@@ -221,7 +218,6 @@ export default function TeacherWorkspace({
         onClear={() =>
           active === 'whiteboard' ? whiteboardRef.current?.clear() : drawLayerRef.current?.clear()
         }
-        onComplete={() => setActiveTool('select')}
         allowInteraction={appSettings.allowInteraction}
       />
 
@@ -231,7 +227,6 @@ export default function TeacherWorkspace({
         ref={drawLayerRef}
         config={penConfig}
         eraserRadius={eraserRadius}
-        eraserMode={eraserMode}
         socket={socket}
         roomCode={roomCode}
         tool={active === 'whiteboard' ? null : activeTool === 'pen' ? 'pen' : activeTool === 'eraser' ? 'eraser' : null}

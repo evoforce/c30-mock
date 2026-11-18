@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import type { User, EraserMode } from '@c30/shared';
+import type { User } from '@c30/shared';
 import {
   GraduationCap,
   Presentation,
@@ -21,11 +21,11 @@ import {
   Undo2,
   Redo2,
   Trash2,
-  Check,
   RefreshCw,
   X,
 } from 'lucide-react';
-import { useDrag } from '../hooks/useDrag';
+import { useDragAnywhere } from '../hooks/useDragAnywhere';
+import { overlayIn } from '../lib/overlayAnim';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 import PenPanel, { type PenConfig } from './PenPanel';
 import EraserPanel from './EraserPanel';
@@ -117,25 +117,15 @@ export default function FloatingDock({
     setSideY((prev) => ({ ...prev, [side]: Math.max(8, Math.min(top, maxTop)) }));
   }, []);
 
-  // 展开态拖动:按「侧边栏自身矩形」算位移,不按把手的矩形(否则会跳 16px)
-  const startDockDrag = (side: 'left' | 'right') => (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    const el = side === 'left' ? leftDockRef.current : rightDockRef.current;
-    if (!el) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const startClientY = e.clientY;
-    const startTop = el.getBoundingClientRect().top;
-    const onMove = (ev: PointerEvent) => {
-      setSideYClamped(side, startTop + (ev.clientY - startClientY), el);
-    };
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  };
+  // 展开态拖动:侧边栏上**任意位置**按下都能拖(包括按钮),
+  // 不再需要「拖拽把手 / 拖动图标」,也不会只剩边缘能拖:
+  //   · 位移 < 5px 视为点击,按钮功能照常;
+  //   · 位移 ≥ 5px 视为拖动,松手后吞掉那一次 click(不会拖完顺手点开功能)。
+  const dockDrag = useDragAnywhere('y', (p) => {
+    if (!openSide) return;
+    const el = openSide === 'left' ? leftDockRef.current : rightDockRef.current;
+    setSideYClamped(openSide, p.y, el);
+  });
 
   // 拉取系统窗口列表(打开面板时/手动刷新)
   const refreshWindows = useCallback(async () => {
@@ -179,13 +169,16 @@ export default function FloatingDock({
           点箭头 = 展开该侧(同时只允许一侧展开);按住上下拖 = 调整该侧位置。 */}
       {openSide !== 'left' && (
         <div
+          key="arrow-left"
           data-interactive
+          data-overlay-anim
           style={{
             position: 'fixed',
             left: 0,
             zIndex: 80,
             pointerEvents: 'auto',
             ...verticalStyle('left'),
+            ...overlayIn('left'),
           }}
         >
           <SideArrow
@@ -198,13 +191,16 @@ export default function FloatingDock({
       )}
       {openSide !== 'right' && (
         <div
+          key="arrow-right"
           data-interactive
+          data-overlay-anim
           style={{
             position: 'fixed',
             right: 0,
             zIndex: 80,
             pointerEvents: 'auto',
             ...verticalStyle('right'),
+            ...overlayIn('right'),
           }}
         >
           <SideArrow
@@ -216,11 +212,16 @@ export default function FloatingDock({
         </div>
       )}
 
-      {/* 当前展开的侧边栏(同时最多只展开一侧;也可以两侧都收起) */}
+      {/* 当前展开的侧边栏(同时最多只展开一侧;也可以两侧都收起)。
+          入场:按贴边方向从屏幕外滑入 + 淡入(key 保证换边/重开都重播)。 */}
       {openSide !== null && (
       <div
+        key={`dock-${openSide}`}
         ref={openSide === 'left' ? leftDockRef : rightDockRef}
         data-interactive
+        data-overlay-anim
+        onPointerDown={dockDrag.onPointerDown}
+        onClickCapture={dockDrag.onClickCapture}
         style={{
           position: 'fixed',
           [openSide]: px(12),
@@ -235,29 +236,12 @@ export default function FloatingDock({
           paddingBottom: px(16),
           boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
           pointerEvents: 'auto',
+          userSelect: 'none',
           zIndex: 80,
+          // 从贴边那一侧滑入 + 淡入(贴左从左进、贴右从右进)
+          ...overlayIn(openSide),
         }}
       >
-        {/* 顶部拖拽手柄(上下拖动) */}
-        <div
-          onPointerDown={startDockDrag(openSide)}
-          title="上下拖动"
-          style={{
-            position: 'absolute',
-            top: -px(16),
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: px(52),
-            height: px(16),
-            cursor: 'ns-resize',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <div style={{ width: px(34), height: px(5), borderRadius: px(3), background: '#9ca3af' }} />
-        </div>
-
         {/* 收起按钮:点击后本侧收起为一个可拖动的贴边箭头(另一侧此时仍可单独展开) */}
         <button
           onClick={() => setOpenSide(null)}
@@ -407,6 +391,7 @@ export default function FloatingDock({
       {menuOpen && (
         <div
           data-interactive
+          data-overlay-anim
           style={{
             position: 'fixed',
             top: '50%',
@@ -421,6 +406,8 @@ export default function FloatingDock({
             zIndex: 121,
             boxShadow: '0 16px 48px rgba(0,0,0,0.25)',
             pointerEvents: 'auto',
+            // 居中弹窗:原地淡入 + 轻微上浮
+            ...overlayIn('fade'),
           }}
         >
           {/* 标题栏 + 关闭叉号 */}
@@ -503,6 +490,7 @@ export default function FloatingDock({
       {windowsOpen && (
         <div
           data-interactive
+          data-overlay-anim
           style={{
             position: 'fixed',
             top: '50%',
@@ -520,6 +508,8 @@ export default function FloatingDock({
             flexDirection: 'column',
             gap: px(10),
             pointerEvents: 'auto',
+            // 面板贴在屏幕哪一侧,就从哪一侧滑入
+            ...overlayIn(openSide === 'left' ? 'right' : 'left'),
           }}
         >
           {/* 标题栏 + 关闭叉号 */}
@@ -779,8 +769,8 @@ function SettingRow({
 
 // 贴边收起箭头:
 //   · 单击 = 展开这一侧(同时只展开一侧);
-//   · 按住上下拖 = 调整这一侧的位置(位移超过 4px 就判定为拖动,松手不触发展开);
-//   · 下方两道短横是「可拖动」的视觉提示,避免老师以为它只能点。
+//   · 按住上下拖 = 调整这一侧的位置(位移超过 4px 就判定为拖动,松手不触发展开)。
+// 不再画「可拖动」的把手短横:浮层上不出现任何拖拽图标,拖动能力保留。
 function SideArrow({
   direction,
   onOpen,
@@ -871,11 +861,6 @@ function SideArrow({
       }}
     >
       {direction === 'left' ? <ChevronRight size={px(28)} /> : <ChevronLeft size={px(28)} />}
-      {/* 拖动把手提示 */}
-      <span style={{ display: 'flex', flexDirection: 'column', gap: px(3), opacity: 0.5 }}>
-        <span style={{ width: px(14), height: px(2), borderRadius: px(1), background: 'currentColor' }} />
-        <span style={{ width: px(14), height: px(2), borderRadius: px(1), background: 'currentColor' }} />
-      </span>
     </button>
   );
 }
@@ -921,13 +906,15 @@ export function TopStatusBar({
 }
 
 // 底部悬浮工具条:选择/画笔/板擦/互动/聚焦,贴底边,可左右拖动 + 右端收起箭头。
+// 拖动不设手柄:按住工具条的空白背景就能左右拖(浮层上不出现任何拖拽图标)。
 //
-// 选择逻辑(本次优化重点):
+// 选择逻辑:
 //   · 第一次点击某个工具 → 立刻切换到该功能(不做二次确认,不弹菜单);
 //   · 再次点击「已激活」且带菜单的工具(画笔/板擦) → 展开/收起它的调整菜单;
 //   · 带菜单的工具在按钮右上角有一枚小箭头角标(未展开朝上、展开后朝下),
 //     配合 tooltip「再点一次调整」,老师不用猜就能知道这个按钮还有第二层;
-//   · 选中态用「实心蓝底 + 白字加粗 + 蓝色外发光」,并额外显示撤销/重做/清空/完成操作条。
+//   · 选中态用「实心蓝底 + 白字加粗 + 蓝色外发光」,画笔/板擦激活时额外显示
+//     撤销 / 重做 / 清空 操作条(不提供「完成」:切走工具即完成,不需要多余一步)。
 export function BottomToolbar({
   activeTool,
   onToolChange,
@@ -935,12 +922,9 @@ export function BottomToolbar({
   onPenConfigChange,
   eraserRadius,
   onEraserRadiusChange,
-  eraserMode,
-  onEraserModeChange,
   onUndo,
   onRedo,
   onClear,
-  onComplete,
   allowInteraction = true,
 }: {
   activeTool: string;
@@ -949,13 +933,9 @@ export function BottomToolbar({
   onPenConfigChange: (c: PenConfig) => void;
   eraserRadius: number;
   onEraserRadiusChange: (radius: number) => void;
-  // 板擦擦除方式(清笔迹 / 区域擦除),由「板擦」高级菜单切换
-  eraserMode: EraserMode;
-  onEraserModeChange: (mode: EraserMode) => void;
   onUndo: () => void;
   onRedo: () => void;
   onClear: () => void;
-  onComplete: () => void;
   // 是否允许互动(设置项关闭时,互动按钮置灰并弹提示)
   allowInteraction?: boolean;
 }) {
@@ -974,8 +954,8 @@ export function BottomToolbar({
 
   const isDrawingTool = activeTool === 'pen' || activeTool === 'eraser';
 
-  // 左右拖动:夹在屏幕内,避免把工具条拖到屏幕外
-  const onDrag = useDrag('x', (p) => {
+  // 左右拖动:工具条上**任意位置**都能拖(同样不需要手柄),拖动结束后吞掉一次 click
+  const barDrag = useDragAnywhere('x', (p) => {
     const w = wrapRef.current?.getBoundingClientRect().width ?? 0;
     setX(Math.max(8, Math.min(p.x, window.innerWidth - w - 8)));
   });
@@ -1045,6 +1025,7 @@ export function BottomToolbar({
     return (
       <div
         data-interactive
+        data-overlay-anim
         style={{
           position: 'fixed',
           bottom: 0,
@@ -1052,6 +1033,8 @@ export function BottomToolbar({
           transform: 'translateX(-50%)',
           pointerEvents: 'auto',
           zIndex: 70,
+          // 贴底边:从屏幕下方往上滑入 + 淡入
+          ...overlayIn('up', 160),
         }}
       >
         <button
@@ -1092,6 +1075,9 @@ export function BottomToolbar({
       <div
         ref={wrapRef}
         data-interactive
+        data-overlay-anim
+        onPointerDown={barDrag.onPointerDown}
+        onClickCapture={barDrag.onClickCapture}
         style={{
           position: 'fixed',
           bottom: px(18),
@@ -1102,16 +1088,18 @@ export function BottomToolbar({
           alignItems: 'center',
           gap: px(10),
           pointerEvents: 'auto',
+          userSelect: 'none',
           zIndex: 70,
+          // 贴底边:从屏幕下方往上滑入 + 淡入
+          ...overlayIn('up'),
         }}
       >
-        {/* 画笔/板擦激活时:撤销/重做/清空/完成 操作条(悬浮在工具条上方) */}
+        {/* 画笔/板擦激活时:撤销/重做/清空 操作条(悬浮在工具条上方) */}
         {isDrawingTool && (
           <div style={{ display: 'flex', gap: px(10) }}>
             <ToolBtn onClick={onUndo} label="撤销" Icon={Undo2} scale={s} />
             <ToolBtn onClick={onRedo} label="重做" Icon={Redo2} scale={s} />
             <ToolBtn onClick={onClear} label="清空" Icon={Trash2} danger scale={s} />
-            <ToolBtn onClick={onComplete} label="完成" Icon={Check} primary scale={s} />
           </div>
         )}
 
@@ -1132,35 +1120,18 @@ export function BottomToolbar({
           </div>
         )}
 
-        {/* 工具条本体 */}
+        {/* 工具条本体(拖动由外层统一处理,没有拖拽手柄/图标) */}
         <div
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: px(6),
-            padding: `${px(8)}px ${px(12)}px`,
+            padding: `${px(8)}px ${px(14)}px`,
             borderRadius: px(20),
             background: '#1b1b1f',
             boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
           }}
         >
-          {/* 左端拖拽手柄 */}
-          <div
-            onPointerDown={onDrag}
-            title="左右拖动"
-            style={{
-              width: px(18),
-              alignSelf: 'stretch',
-              cursor: 'ew-resize',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginRight: px(2),
-            }}
-          >
-            <div style={{ width: px(5), height: px(28), borderRadius: px(3), background: '#6b7280' }} />
-          </div>
-
           {TOOLBAR.map((t) => {
             const disabled = t.key === 'interact' && !allowInteraction;
             const isActive = activeTool === t.key && !disabled;
@@ -1279,27 +1250,29 @@ export function BottomToolbar({
         </div>
       </div>
 
-      {/* 调整菜单(画笔设置/板擦大小):独立 fixed 浮层,不参与工具条布局,拖动时不抖 */}
+      {/* 调整菜单(画笔设置/板擦大小):独立 fixed 浮层,不参与工具条布局,拖动时不抖。
+          菜单从工具条上方「自下而上」滑入 + 淡入,key 保证两个菜单互换时重播动画。 */}
       {openMenu && menuPos && (
         <div
+          key={openMenu}
           data-interactive
+          data-overlay-anim
           style={{
             position: 'fixed',
             left: menuPos.left,
             bottom: menuPos.bottom,
             zIndex: 72,
             pointerEvents: 'auto',
+            // 小屏/低分辨率下菜单可能比可视区还高:限高 + 内部滚动,避免顶出屏幕
+            maxHeight: `calc(100vh - ${menuPos.bottom + 12}px)`,
+            overflowY: 'auto',
+            ...overlayIn('up', 160),
           }}
         >
           {openMenu === 'pen' ? (
             <PenPanel config={penConfig} onChange={onPenConfigChange} />
           ) : (
-            <EraserPanel
-              radius={eraserRadius}
-              onChange={onEraserRadiusChange}
-              mode={eraserMode}
-              onModeChange={onEraserModeChange}
-            />
+            <EraserPanel radius={eraserRadius} onChange={onEraserRadiusChange} />
           )}
         </div>
       )}
@@ -1307,20 +1280,18 @@ export function BottomToolbar({
   );
 }
 
-// 工具栏操作按钮(黑色,撤销/重做/清空/完成)
+// 工具栏操作按钮(黑色,撤销/重做/清空)
 function ToolBtn({
   onClick,
   label,
   Icon,
   danger,
-  primary,
   scale,
 }: {
   onClick: () => void;
   label: string;
   Icon: LucideIcon;
   danger?: boolean;
-  primary?: boolean;
   scale: number;
 }) {
   const px = (n: number) => scaled(n, scale);
@@ -1334,8 +1305,8 @@ function ToolBtn({
         borderRadius: px(14),
         border: 'none',
         cursor: 'pointer',
-        background: primary ? '#2563eb' : '#26262b',
-        color: primary ? '#fff' : danger ? '#f87171' : '#d1d5db',
+        background: '#26262b',
+        color: danger ? '#f87171' : '#d1d5db',
         boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
         display: 'flex',
         flexDirection: 'column',

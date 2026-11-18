@@ -20,3 +20,70 @@ body {
 * {
   box-sizing: border-box;
 }
+
+/* ---- 浮层入场动画 ----
+ * 浮层从屏幕外沿「朝屏幕里」的方向滑入 + 淡入:
+ *   · 贴右侧 → 从右边滑入;贴左侧 → 从左边滑入;贴底边 → 从下方滑入。
+ * 实现要点:用独立的 `translate` 属性做位移(不用 transform),
+ * 不会覆盖浮层自身用于垂直居中的 transform。
+ */
+@keyframes overlay-in-right {
+  from {
+    translate: 100% 0;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-in-left {
+  from {
+    translate: -100% 0;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-in-up {
+  from {
+    translate: 0 100%;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-in-down {
+  from {
+    translate: 0 -100%;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-fade-in {
+  from {
+    translate: 0 10px;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-overlay-anim] {
+    animation-duration: 1ms !important;
+  }
+}

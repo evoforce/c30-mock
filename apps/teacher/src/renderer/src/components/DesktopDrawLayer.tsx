@@ -1,5 +1,5 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef, useCallback, useState } from 'react';
-import type { Stroke, Point, PenType, EraserMode } from '@c30/shared';
+import type { Stroke, Point, PenType } from '@c30/shared';
 import { PEN_DEFAULT_OPACITY } from '@c30/shared';
 import type { Socket } from 'socket.io-client';
 import { CanvasRenderer } from './Renderer';
@@ -21,7 +21,7 @@ import {
 // 板擦(与白板内板擦同一套几何,见 lib/eraser.ts):
 //   · 矩形板擦,只在「按下」时显示,松开即消失(不再有跟随鼠标的圆环);
 //   · 按住拖动 = 细分轨迹连续擦除,手感是自由擦除;
-//   · 擦除方式分「清笔迹(整条)/ 区域擦除(只擦相交部分)」,由底部「板擦」高级菜单切换。
+//   · 擦除语义固定为「自由擦除」:只擦掉与板擦矩形相交的部分,其余笔迹保留。
 
 type DesktopOp =
   | { kind: 'append'; strokes: Stroke[] }
@@ -42,12 +42,10 @@ interface Props {
   tool: 'pen' | 'eraser' | null;
   /** 板擦半径(逻辑像素),由底部工具条「板擦」菜单调整 */
   eraserRadius?: number;
-  /** 板擦擦除方式:清笔迹(整条清除)/ 区域擦除(只擦相交部分) */
-  eraserMode?: EraserMode;
 }
 
 const DesktopDrawLayer = forwardRef<DesktopDrawHandle, Props>(function DesktopDrawLayer(
-  { config, socket, roomCode, tool, eraserRadius = 24, eraserMode = 'stroke' },
+  { config, socket, roomCode, tool, eraserRadius = 40 },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -73,9 +71,6 @@ const DesktopDrawLayer = forwardRef<DesktopDrawHandle, Props>(function DesktopDr
   // 板擦半径(逻辑像素):随「板擦」菜单调整,用 ref 让全局鼠标钩子回调读到最新值
   const eraserRadiusRef = useRef(eraserRadius);
   eraserRadiusRef.current = eraserRadius;
-  // 擦除方式(清笔迹 / 区域擦除)
-  const eraserModeRef = useRef<EraserMode>(eraserMode);
-  eraserModeRef.current = eraserMode;
   // 矩形板擦位置:只在按住鼠标时非空(按下才生成,松开即消失)
   const [eraserRect, setEraserRect] = useState<EraserRect | null>(null);
 
@@ -156,14 +151,12 @@ const DesktopDrawLayer = forwardRef<DesktopDrawHandle, Props>(function DesktopDr
   }, [renderAll, emit]);
 
   /**
-   * 用一串矩形擦除笔迹:
-   *   · 清笔迹 → 碰到哪条就整条删除;
-   *   · 区域擦除 → 只裁掉相交部分,剩余部分切成片段(remove 旧笔 + append 新片段)。
+   * 用一串矩形擦除笔迹(自由擦除):
+   * 只裁掉与矩形相交的部分,剩余部分切成片段(remove 旧笔 + append 新片段)。
    */
   const applyEraseRects = useCallback(
     (rects: EraserRect[]) => {
       if (rects.length === 0) return;
-      const areaMode = eraserModeRef.current === 'area';
       const gesture = eraseGestureRef.current;
       const kept: Stroke[] = [];
       const removedIds: string[] = [];
@@ -178,7 +171,6 @@ const DesktopDrawLayer = forwardRef<DesktopDrawHandle, Props>(function DesktopDr
         changed = true;
         removedIds.push(s.id);
         if (gesture && !gesture.createdIds.has(s.id)) gesture.before.push(s);
-        if (!areaMode) continue;
 
         const pieces = clipStrokeByRects(s, rects);
         added.push(...pieces);

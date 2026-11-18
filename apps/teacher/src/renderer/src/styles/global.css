@@ -30,3 +30,74 @@ body {
   }
 }
 
+/* ---- 浮层入场动画 ----
+ * 浮层从屏幕外沿「朝屏幕里」的方向滑入 + 淡入:
+ *   · 贴右侧 → 从右边滑入(overlay-in-left:起点在 +X)
+ *   · 贴左侧 → 从左边滑入
+ *   · 贴底边(底部工具条)→ 从下方滑入
+ * 实现要点:用独立的 `translate` 属性做位移,而不是 `transform` ——
+ * 浮层自身用 transform 做垂直居中(translateY(-50%)),两者互不覆盖。
+ */
+@keyframes overlay-in-right {
+  from {
+    translate: 100% 0;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-in-left {
+  from {
+    translate: -100% 0;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-in-up {
+  from {
+    translate: 0 100%;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+@keyframes overlay-in-down {
+  from {
+    translate: 0 -100%;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+/* 居中弹出类(设置/窗口面板):轻微上浮 + 淡入 */
+@keyframes overlay-fade-in {
+  from {
+    translate: 0 10px;
+    opacity: 0;
+  }
+  to {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+/* 系统开启「减少动态效果」时缩短动画,避免晕动 */
+@media (prefers-reduced-motion: reduce) {
+  [data-overlay-anim] {
+    animation-duration: 1ms !important;
+  }
+}
+

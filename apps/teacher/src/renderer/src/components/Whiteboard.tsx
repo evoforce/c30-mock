@@ -12,7 +12,6 @@ import type {
   ImageItem,
   WhiteboardTheme,
   PenType,
-  EraserMode,
 } from '@c30/shared';
 import { PEN_DEFAULT_OPACITY } from '@c30/shared';
 import { CanvasRenderer } from './Renderer';
@@ -47,8 +46,6 @@ interface Props {
   penConfig?: PenConfig;
   // 板擦半径(来自底部工具条「板擦」菜单,与桌面批注一致)
   eraserRadius?: number;
-  // 板擦擦除方式:清笔迹(整条清除)/ 区域擦除(只擦相交部分)
-  eraserMode?: EraserMode;
 }
 
 // 白板背景主题定义:背景色 + 可选网格/格线纹理
@@ -158,8 +155,7 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     onExit,
     activeTool = 'pen',
     penConfig,
-    eraserRadius = 24,
-    eraserMode = 'stroke',
+    eraserRadius = 40,
   },
   ref,
 ) {
@@ -187,7 +183,7 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     penType: 'pen',
     color: '#1f2937',
     strokeWidth: 4,
-    eraserRadius: 24,
+    eraserRadius: 40,
   });
   const toolRef = useRef(tool);
   toolRef.current = tool;
@@ -219,9 +215,7 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     setTool((prev) => (prev.eraserRadius === eraserRadius ? prev : { ...prev, eraserRadius }));
   }, [eraserRadius]);
 
-  // 板擦擦除方式(清笔迹 / 区域擦除)由「板擦」高级菜单控制
-  const eraserModeRef = useRef<EraserMode>(eraserMode);
-  eraserModeRef.current = eraserMode;
+  // 板擦:固定「自由擦除」语义(只擦掉与板擦矩形相交的部分),不再有模式开关
 
   // ---- 板擦:按住才出现的矩形板擦 + 拖动自由擦除 ----
   // eraserRect 只在「鼠标按下 → 抬起」期间有值,所以板擦样式不会跟着鼠标乱飘
@@ -329,14 +323,12 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   // ---- 板擦:矩形板擦 + 拖动自由擦除 ----
   //
   // 擦除语义(对应 docs/whiteboard-design.md「擦除语义」):
-  //   · 清笔迹(stroke):板擦矩形碰到哪条笔迹,那条笔迹整条删除;
-  //   · 区域擦除(area):板擦像画笔一样涂抹,只把与板擦相交的部分裁掉,
+  //   · 自由擦除:板擦像画笔一样涂抹,只把与板擦矩形相交的部分裁掉,
   //     剩下的部分切成若干普通笔迹片段(remove 旧的 + append 新的同步给学生端)。
-  // 两种模式都是「按下 → 拖动」连续生效;轨迹按细步长细分(见 lib/eraser.ts),
-  // 所以手感是连续自由擦除,不会一节一节跳。一次手势(按下→抬起)合成一步 undo。
+  //   · 轨迹按细步长细分(见 lib/eraser.ts),手感是连续自由擦除,不会一节一节跳。
+  //   · 一次手势(按下→抬起)合成一步 undo。
   const applyEraseRects = (rects: EraserRect[]) => {
     if (rects.length === 0) return;
-    const areaMode = eraserModeRef.current === 'area';
     const gesture = eraseGestureRef.current;
 
     const kept: Stroke[] = [];
@@ -353,7 +345,6 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       removedIds.push(s.id);
       // 手势期间自己切出来的片段不算「擦前笔迹」,否则 undo 会把片段当成原件还原
       if (gesture && !gesture.createdIds.has(s.id)) gesture.before.push(s);
-      if (!areaMode) continue; // 清笔迹:整条删除,不留片段
 
       const pieces = clipStrokeByRects(s, rects);
       added.push(...pieces);

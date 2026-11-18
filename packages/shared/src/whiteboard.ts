@@ -6,11 +6,6 @@ export type PenType = 'brush' | 'pen' | 'pencil';
 // 激活工具
 export type ActiveTool = 'pen' | 'eraser' | 'select';
 
-// 板擦擦除方式
-//  · 'stroke' 清笔迹:碰到笔迹就整条清除(干净、利落,适合快速清场)
-//  · 'area'   区域擦除:像画笔一样涂抹,只擦掉与板擦相交的部分(保留其余笔迹)
-export type EraserMode = 'stroke' | 'area';
-
 // 工具状态
 export interface ToolState {
   activeTool: ActiveTool;

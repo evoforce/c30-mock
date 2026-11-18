@@ -21,10 +21,11 @@ import {
   ChevronRight,
   ChevronLeft,
   Undo2,
+  Redo2,
   Trash2,
-  Check,
 } from 'lucide-react';
-import { useDrag } from '../hooks/useDrag';
+import { useDragAnywhere } from '../hooks/useDragAnywhere';
+import { overlayIn } from '../lib/overlayAnim';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 import PenPanel, { type PenConfig } from './PenPanel';
 
@@ -94,29 +95,17 @@ export default function FloatingDock({
   const dockRef = useRef<HTMLDivElement>(null);
 
   // 把 top 夹在屏幕内(用当前组件自身高度:收起后的箭头比展开态矮,各自夹各自的)
-  const setTopClamped = useCallback((top: number, el: HTMLElement | null) => {
+  const topClamped = useCallback((top: number, el: HTMLElement | null) => {
     const h = el?.getBoundingClientRect().height ?? 0;
     const maxTop = Math.max(8, window.innerHeight - h - 8);
-    setY(Math.max(8, Math.min(top, maxTop)));
+    return Math.max(8, Math.min(top, maxTop));
   }, []);
 
-  // 展开态拖动:按「侧栏自身矩形」算位移,不按把手的矩形(否则会跳 16px)
-  const startDockDrag = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    const el = dockRef.current;
-    if (!el) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const startClientY = e.clientY;
-    const startTop = el.getBoundingClientRect().top;
-    const onMoveEv = (ev: PointerEvent) => setTopClamped(startTop + (ev.clientY - startClientY), el);
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMoveEv);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMoveEv);
-    window.addEventListener('pointerup', onUp);
-  };
+  // 展开态拖动:侧边栏任意位置按下都能拖(含按钮),位移 <5px 仍算点击;
+  // 浮层上不再有任何拖拽把手/图标。
+  const dockDrag = useDragAnywhere('y', (p) => {
+    setY(topClamped(p.y, dockRef.current));
+  });
 
   const verticalStyle: React.CSSProperties = {
     top: y ?? '50%',
@@ -127,13 +116,17 @@ export default function FloatingDock({
   if (collapsed) {
     return (
       <div
+        key={`arrow-${side}`}
         data-interactive
+        data-overlay-anim
         style={{
           position: 'fixed',
           [side]: 0,
           zIndex: 80,
           pointerEvents: 'auto',
           ...verticalStyle,
+          // 从贴边那一侧滑入 + 淡入
+          ...overlayIn(side),
         }}
       >
         <SideArrow
@@ -148,8 +141,12 @@ export default function FloatingDock({
 
   return (
     <div
+      key={`dock-${side}`}
       ref={dockRef}
       data-interactive
+      data-overlay-anim
+      onPointerDown={dockDrag.onPointerDown}
+      onClickCapture={dockDrag.onClickCapture}
       style={{
         position: 'fixed',
         [side]: px(12),
@@ -164,29 +161,12 @@ export default function FloatingDock({
         paddingBottom: px(16),
         boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
         pointerEvents: 'auto',
+        userSelect: 'none',
         zIndex: 80,
+        // 从贴边那一侧滑入 + 淡入
+        ...overlayIn(side),
       }}
     >
-      {/* 顶部拖拽手柄(上下拖动) */}
-      <div
-        onPointerDown={startDockDrag}
-        title="上下拖动"
-        style={{
-          position: 'absolute',
-          top: -px(16),
-          left: '50%',
-          transform: 'translateX(-50%)',
-          width: px(52),
-          height: px(16),
-          cursor: 'ns-resize',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        <div style={{ width: px(34), height: px(5), borderRadius: px(3), background: '#9ca3af' }} />
-      </div>
-
       {/* 折叠按钮(贴边侧的对侧,垂直居中,半圆形) */}
       <button
         onClick={() => setCollapsed(true)}
@@ -530,11 +510,6 @@ function SideArrow({
       }}
     >
       {direction === 'left' ? <ChevronRight size={px(28)} /> : <ChevronLeft size={px(28)} />}
-      {/* 拖动把手提示 */}
-      <span style={{ display: 'flex', flexDirection: 'column', gap: px(3), opacity: 0.5 }}>
-        <span style={{ width: px(14), height: px(2), borderRadius: px(1), background: 'currentColor' }} />
-        <span style={{ width: px(14), height: px(2), borderRadius: px(1), background: 'currentColor' }} />
-      </span>
     </button>
   );
 }
@@ -587,20 +562,21 @@ export function BottomToolbar({
   penConfig,
   onPenConfigChange,
   onUndo,
+  onRedo,
   onClear,
-  onComplete,
 }: {
   activeTool: string;
   onToolChange: (key: string) => void;
   penConfig: PenConfig;
   onPenConfigChange: (c: PenConfig) => void;
   onUndo: () => void;
+  onRedo: () => void;
   onClear: () => void;
-  onComplete: () => void;
 }) {
   const [x, setX] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState(false);
-  const onDrag = useDrag('x', (p) => setX(p.x));
+  // 整条工具条任意位置可拖(位移 <5px 仍算点击),没有拖拽手柄
+  const barDrag = useDragAnywhere('x', (p) => setX(p.x));
 
   const isPen = activeTool === 'pen';
 
@@ -609,6 +585,7 @@ export function BottomToolbar({
     return (
       <div
         data-interactive
+        data-overlay-anim
         style={{
           position: 'fixed',
           bottom: 0,
@@ -616,6 +593,7 @@ export function BottomToolbar({
           transform: 'translateX(-50%)',
           pointerEvents: 'auto',
           zIndex: 70,
+          ...overlayIn('up', 160),
         }}
       >
         <button
@@ -654,6 +632,9 @@ export function BottomToolbar({
   return (
     <div
       data-interactive
+      data-overlay-anim
+      onPointerDown={barDrag.onPointerDown}
+      onClickCapture={barDrag.onClickCapture}
       style={{
         position: 'fixed',
         bottom: 16,
@@ -664,50 +645,36 @@ export function BottomToolbar({
         alignItems: 'center',
         gap: 10,
         pointerEvents: 'auto',
+        userSelect: 'none',
         zIndex: 70,
+        // 贴底边:从屏幕下方往上滑入 + 淡入
+        ...overlayIn('up'),
       }}
     >
-      {/* 画笔模式:黑色画笔设置面板 + 撤销/清空/完成(悬浮在工具条上方) */}
+      {/* 画笔模式:黑色画笔设置面板 + 撤销/重做/清空(悬浮在工具条上方) */}
       {isPen && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
           <PenPanel config={penConfig} onChange={onPenConfigChange} />
           <div style={{ display: 'flex', gap: 10 }}>
             <ToolBtn onClick={onUndo} label="撤销" icon={<Undo2 size={22} />} />
+            <ToolBtn onClick={onRedo} label="重做" icon={<Redo2 size={22} />} />
             <ToolBtn onClick={onClear} label="清空" icon={<Trash2 size={22} />} danger />
-            <ToolBtn onClick={onComplete} label="完成" icon={<Check size={22} />} primary />
           </div>
         </div>
       )}
 
-      {/* 工具条本体 */}
+      {/* 工具条本体(整块任意位置可拖,没有拖拽手柄) */}
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          padding: '8px 12px',
+          padding: '8px 14px',
           borderRadius: 18,
           background: '#1b1b1f',
           boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
         }}
       >
-        {/* 左端拖拽手柄 */}
-        <div
-          onPointerDown={onDrag}
-          title="左右拖动"
-          style={{
-            width: 16,
-            alignSelf: 'stretch',
-            cursor: 'ew-resize',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            marginRight: 2,
-          }}
-        >
-          <div style={{ width: 5, height: 26, borderRadius: 3, background: '#9ca3af' }} />
-        </div>
-
         {TOOLBAR.map((t) => (
           <button
             key={t.key}
@@ -770,19 +737,17 @@ export function BottomToolbar({
   );
 }
 
-// 工具栏操作按钮(黑色,撤销/清空/完成)
+// 工具栏操作按钮(黑色,撤销/重做/清空)
 function ToolBtn({
   onClick,
   label,
   icon,
   danger,
-  primary,
 }: {
   onClick: () => void;
   label: string;
   icon: React.ReactNode;
   danger?: boolean;
-  primary?: boolean;
 }) {
   return (
     <button
@@ -794,8 +759,8 @@ function ToolBtn({
         borderRadius: 14,
         border: 'none',
         cursor: 'pointer',
-        background: primary ? '#2563eb' : '#26262b',
-        color: primary ? '#fff' : danger ? '#f87171' : '#d1d5db',
+        background: '#26262b',
+        color: danger ? '#f87171' : '#d1d5db',
         boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
         display: 'flex',
         flexDirection: 'column',
