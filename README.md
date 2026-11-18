@@ -35,6 +35,8 @@ packages/
   mdsd/               # mDNS 封装
 docs/
   whiteboard-design.md  # 白板设计
+  CONTRIBUTING.md       # 研发规范(提交纪律 / changeset)
+  worklog/              # 每日工作记录
 ```
 
 ## 快速开始
@@ -55,3 +57,11 @@ pnpm --filter student dev
 ## 设计文档
 
 - [白板功能设计](docs/whiteboard-design.md)
+
+## 研发规范
+
+**完成一个 feat 或 fix 后立即可提交并附 changeset**,一个提交只做一件事。详见:
+
+- [研发规范(提交纪律 / changeset / 自查清单)](docs/CONTRIBUTING.md)
+- [每日工作记录](docs/worklog/)
+- [技术复盘:画笔按下后光标冻结](docs/retro-mouse-freeze-2026-11-18.md)
