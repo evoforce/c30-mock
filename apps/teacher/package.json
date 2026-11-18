@@ -19,7 +19,9 @@
       "buildResources": "build"
     },
     "files": [
-      "out/**/*"
+      "out/**/*",
+      "!node_modules/@c30/**",
+      "!packages/**"
     ],
     "asarUnpack": [
       "**/*.node"
