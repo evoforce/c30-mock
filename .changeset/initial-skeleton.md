@@ -2,7 +2,6 @@
 "@c30/shared": patch
 "@c30/ui": patch
 "@c30/mdsd": patch
-"@c30/server": patch
 "@c30/teacher": patch
 "@c30/student": patch
 "@c30/whiteboard-native": patch
