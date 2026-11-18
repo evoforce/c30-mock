@@ -419,13 +419,15 @@ async function captureScreenRect(rect: SpotlightRect, hideWindow = true): Promis
 }
 
 // 隐藏悬浮窗口(等待 DWM 合成器移除画面),用于弹原生对话框前避开 alwaysOnTop 遮挡。
-// 同时解除置顶 + 恢复鼠标穿透:即使窗口未能完全隐藏,也不再盖住/挡住原生对话框。
+// 解除置顶即可;窗口已 hide(),不会再挡住原生对话框。
 async function hideFloatingWindow(): Promise<void> {
   if (!mainWindow) return;
   try {
     mainWindow.setAlwaysOnTop(false);
   } catch { /* ignore */ }
-  mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  // 注意:不要在这里改 setIgnoreMouseEvents。渲染层 usePointerPassthrough 用
+  // lastState 缓存做增量上报,主进程一旦直接改穿透状态就会与之失同步,
+  // 导致保存后工具栏/聚焦按钮「点不动」(穿透状态卡死)。
   mainWindow.hide();
   await new Promise((r) => setTimeout(r, 120));
 }

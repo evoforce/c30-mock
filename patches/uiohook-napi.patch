@@ -33,19 +33,19 @@ index d4dffe9e74cb2da2dbb99b65dd92173702f8beb7..3f6bc6a48374422a2a1caefb8db9163b
  static napi_threadsafe_function threadsafe_fn = NULL;
  static bool is_worker_running = false;
  
-+// Whether to consume mouse pressed/released/dragged events.
-+// When true (while drawing), the event is not delivered to the underlying window.
++// Whether to consume mouse PRESSED events (drag/release must pass through).
++// When true (while drawing), only PRESSED is swallowed so the cursor still moves.
 +static volatile int g_consume_mouse = 0;
 +
  void dispatch_proc(uiohook_event* const event) {
-+  // Drawing interception: when enabled, set reserved=0x01 on mouse down/up/drag
++  // Drawing interception: when enabled, mark mouse PRESSED as reserved=0x01;
 +  // events. libuiohook's mouse_hook_event_proc sees reserved==0x01 and skips
 +  // CallNextHookEx, so the event is swallowed (not delivered to the system).
 +  if (g_consume_mouse) {
 +    switch (event->type) {
 +      case EVENT_MOUSE_PRESSED:
-+      case EVENT_MOUSE_RELEASED:
-+      case EVENT_MOUSE_DRAGGED:
++      /* NOTE: RELEASED/DRAGGED 必须放行,否则拖动时光标被吞、卡死 */
++      /* (libuiohook: reserved==0x01 时跳过 CallNextHookEx → 事件被系统丢弃) */
 +        event->reserved = 0x01;
 +        break;
 +      default:
