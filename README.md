@@ -54,6 +54,22 @@ pnpm --filter student dev
 
 > 注意:接收端需与发送端在同一局域网内才能通过 mDNS 自动发现。
 
+## 发布与分发
+
+安装包由 GitHub Actions 构建后**直接发布到 GitHub Release**(不再只留在 Actions Artifacts 里),
+用户可在仓库的 Releases 页直接下载教师端/学生端安装包。
+
+```bash
+# 打 tag 并推送 → 自动构建,并创建同名 Release 上传安装包
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+也可在 Actions 页手动运行 `Build & Release Windows Installers`:可指定 tag(留空则自动生成
+`v<版本号>-build.<运行号>`),可勾选草稿先预览;重跑同一 tag 会覆盖该 Release 的附件。
+Release 附件包含两个安装包与 `SHA256SUMS.txt`,配置见
+[build-windows.yml](.github/workflows/build-windows.yml)。
+
 ## 设计文档
 
 - [白板功能设计](docs/whiteboard-design.md)

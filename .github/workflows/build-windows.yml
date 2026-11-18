@@ -1,20 +1,54 @@
-name: Build Windows Installers
+# 构建 Windows 安装包，并直接发布到 GitHub Release 供下载分发（不再只留在 Actions Artifacts 里）。
+#
+# 触发方式：
+#   - 推送 tag（v*）：自动构建 → 创建/更新同名 Release 并上传安装包；
+#   - 手动触发（workflow_dispatch）：可指定 tag（留空则生成 v<版本号>-build.<运行号>），
+#     也可勾选草稿，先在 Release 页预览、确认后再手动发布。
+#
+# Release 附件：
+#   C30-Teacher-Setup-<version>-x64.exe  教师端安装包
+#   C30-Student-Setup-<version>-x64.exe  学生端安装包
+#   SHA256SUMS.txt                       安装包 SHA-256 校验和
+name: Build & Release Windows Installers
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布标签（如 v0.1.0）；留空则自动生成 v<版本号>-build.<运行号>"
+        required: false
+        type: string
+      draft:
+        description: "以草稿形式创建 Release（确认后再手动发布）"
+        required: false
+        default: false
+        type: boolean
+
+# 创建 Release 与上传附件需要写权限。
+permissions:
+  contents: write
+
+# 同一 ref 的发布串行执行，避免两次构建同时往同一个 Release 上传。
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build NSIS installers (x64)
+  build-and-release:
+    name: Build NSIS installers (x64) and publish release
     # 固定 windows-2022(自带 Visual Studio 2022)。
     # 原因:2026-06 起 GitHub 把 windows-latest 重定向到 windows-2025-vs2026(VS 2026),
     # 而 electron-builder 依赖的 node-gyp 9.4.1 只识别 VS 2019/2022,会报
     # "Could not find any Visual Studio installation to use"(native 重建失败)。
     # 后续升级 node-gyp >= 12.1 后可改回 windows-latest。
     runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      # 安装包统一归集到这里，再原样上传到 Release。
+      RELEASE_ASSET_DIR: release-assets
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,14 +84,142 @@ jobs:
       - name: Build student app
         run: pnpm --filter @c30/student build:win
 
-      - name: Upload teacher installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: c30-teacher-windows
-          path: apps/teacher/release/*.exe
+      # electron-builder 产出的文件名是中文 + 空格（如「C30教师端 Setup 0.1.0.exe」），
+      # 作为下载链接/命令行参数容易出问题，这里统一改名为 ASCII 名称并生成校验和。
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outDir = Join-Path $PWD $env:RELEASE_ASSET_DIR
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-      - name: Upload student installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: c30-student-windows
-          path: apps/student/release/*.exe
+          $apps = @(
+            @{ Dir = 'teacher'; Label = 'Teacher' },
+            @{ Dir = 'student'; Label = 'Student' }
+          )
+          $versions = @{}
+
+          foreach ($app in $apps) {
+            $version = (Get-Content (Join-Path $PWD "apps/$($app.Dir)/package.json") -Raw | ConvertFrom-Json).version
+            $installer = Get-ChildItem -Path (Join-Path $PWD "apps/$($app.Dir)/release") -Filter '*.exe' -File |
+              Where-Object { $_.Name -notmatch '(?i)uninstall' } |
+              Sort-Object Length -Descending |
+              Select-Object -First 1
+            if (-not $installer) { throw "未找到 $($app.Label) 安装包：apps/$($app.Dir)/release/*.exe" }
+
+            $assetName = "C30-$($app.Label)-Setup-$version-x64.exe"
+            Copy-Item -Path $installer.FullName -Destination (Join-Path $outDir $assetName) -Force
+            $versions[$app.Label] = $version
+            Write-Host ("· {0} -> {1} ({2:N1} MB)" -f $installer.Name, $assetName, ($installer.Length / 1MB))
+          }
+
+          # 校验和：用户下载后可自行核对，便于内网分发。
+          Get-ChildItem -Path $outDir -Filter '*.exe' -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -Path (Join-Path $outDir 'SHA256SUMS.txt') -Encoding ascii
+
+          # Release 说明：面向下载者的安装指引（单引号 here-string，反引号保持字面量）。
+          $notesTemplate = @'
+          ## 下载安装包
+
+          | 端 | 安装包 | 适用场景 |
+          | --- | --- | --- |
+          | 教师端（发送端） | `C30-Teacher-Setup-{0}-x64.exe` | 教师机安装，启动即创建课堂并广播 |
+          | 学生端（接收端） | `C30-Student-Setup-{1}-x64.exe` | 学生机安装，自动发现并接入同一局域网内的课堂 |
+
+          ### 说明
+
+          - 版本：教师端 {0} · 学生端 {1}
+          - 系统要求：Windows 10 / 11（x64）
+          - 完整性校验：附件 `SHA256SUMS.txt` 记录了 SHA-256，可用 `Get-FileHash .\安装包.exe -Algorithm SHA256` 比对
+          - 安装包未做代码签名：Windows SmartScreen 可能提示“未知发布者”，选择“更多信息 → 仍要运行”即可
+          - 教师端与学生端需处于同一局域网；首次运行时请允许 Windows 防火墙对“专用网络”的访问
+          '@
+          $notes = $notesTemplate -f $versions['Teacher'], $versions['Student']
+          Set-Content -Path (Join-Path $PWD 'release-notes.md') -Value $notes -Encoding utf8
+
+          Write-Host "`n待上传附件："
+          Get-ChildItem -Path $outDir -File | ForEach-Object { Write-Host " · $($_.Name)" }
+
+      # 手动触发时决定发到哪个 tag：显式输入优先，其次当前 ref 是 tag 就用它，
+      # 都不是则用 v<版本号>-build.<运行号>（运行号保证不覆盖历史 Release）。
+      - name: Resolve release tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ inputs.tag }}".Trim()
+          if (-not $tag -and $env:GITHUB_REF_TYPE -eq 'tag') { $tag = $env:GITHUB_REF_NAME }
+          $autoGenerated = $false
+          if (-not $tag) {
+            $version = (Get-Content (Join-Path $PWD 'package.json') -Raw | ConvertFrom-Json).version
+            $tag = "v$version-build.$env:GITHUB_RUN_NUMBER"
+            $autoGenerated = $true
+            Write-Host "未指定 tag，自动生成：$tag"
+          }
+          if ($tag -notmatch '^v\d') { throw "tag 需以 v 开头并带版本号（如 v0.1.0），当前为：$tag" }
+
+          # v1.2.3-beta.1 / v2.0.0-rc1 之类标记为预发布；
+          # 自动生成的 v<版本号>-build.<运行号> 视为正式发布，避免每次手动运行都变成 Pre-release。
+          $prerelease = if (-not $autoGenerated -and $tag -match '^v\d+\.\d+\.\d+-(alpha|beta|rc|pre|preview|dev|next|canary)\.?\d*$') { 'true' } else { 'false' }
+
+          @(
+            "RELEASE_TAG=$tag",
+            "RELEASE_PRERELEASE=$prerelease"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "Release tag: $tag"
+
+      # 已有同名 Release 就覆盖上传（便于重跑），否则新建。
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # gh / git 的失败通过 $LASTEXITCODE 判断，不让 PowerShell 提前抛错。
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = $env:RELEASE_TAG
+          $repo = $env:GITHUB_REPOSITORY
+          $draft = "${{ inputs.draft }}" -eq 'true'
+          $prerelease = $env:RELEASE_PRERELEASE -eq 'true'
+
+          $assetsDir = Join-Path $PWD $env:RELEASE_ASSET_DIR
+          $assets = @(Get-ChildItem -Path $assetsDir -File | ForEach-Object { $_.FullName })
+          if ($assets.Count -eq 0) { throw "$assetsDir 为空，没有可上传的安装包" }
+
+          gh release view $tag --repo $repo *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+
+          if ($releaseExists) {
+            Write-Host "Release $tag 已存在，覆盖上传附件"
+            gh release upload $tag @assets --clobber --repo $repo
+            if ($LASTEXITCODE -ne 0) { throw "上传附件失败（gh exit $LASTEXITCODE）" }
+          }
+          else {
+            $createArgs = @(
+              'release', 'create', $tag, '--repo', $repo,
+              '--title', "C30 局域网教学系统 $tag",
+              '--notes-file', (Join-Path $PWD 'release-notes.md')
+            )
+
+            # tag 不存在时，让它指向本次构建的提交（而不是默认分支 HEAD）。
+            git ls-remote --exit-code --tags origin "refs/tags/$tag" *> $null
+            if ($LASTEXITCODE -ne 0) { $createArgs += @('--target', $env:GITHUB_SHA) }
+
+            if ($draft) { $createArgs += '--draft' }
+            if ($prerelease) { $createArgs += '--prerelease' }
+            $createArgs += $assets
+
+            gh @createArgs
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败（gh exit $LASTEXITCODE）" }
+          }
+
+          $releaseUrl = "$($env:GITHUB_SERVER_URL)/$repo/releases/tag/$tag"
+          Write-Host "Release 地址：$releaseUrl"
+          @(
+            '### 已发布 Release',
+            '',
+            "- [$tag]($releaseUrl)",
+            "- 附件：$($assets.Count) 个（安装包 + SHA256SUMS.txt）"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
