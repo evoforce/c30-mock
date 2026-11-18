@@ -32,6 +32,14 @@ pnpm build         # electron-vite / turbo 构建
 pnpm verify:uiohook   # 原生鼠标钩子产物自检(改了原生模块/补丁时必跑)
 ```
 
+> 若 `pnpm lint`(turbo)在本机卡住或报 `exited (126)`,这是 turbo 在本机执行环境的
+> 问题(不是代码问题),改用 pnpm 递归校验即可,效果等价:
+>
+> ```bash
+> pnpm -r run lint            # 全部包
+> pnpm --filter @c30/teacher lint   # 单个包
+> ```
+
 改了原生模块(`patches/uiohook-napi.patch`)时,还要:
 
 ```bash
