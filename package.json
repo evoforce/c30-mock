@@ -9,7 +9,7 @@
     "build": "turbo run build",
     "build:win": "turbo run build:win",
     "dev": "turbo run dev",
-    "lint": "turbo run lint",
+    "lint": "pnpm -r run lint",
     "test": "turbo run test",
     "changeset": "changeset",
     "version-packages": "changeset version",

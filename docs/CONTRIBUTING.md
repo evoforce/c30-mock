@@ -27,17 +27,25 @@
 ### 3. 提交前先跑自检
 
 ```bash
-pnpm lint          # tsc --noEmit(各 workspace)
+pnpm lint          # = pnpm -r run lint(各 workspace 跑 tsc --noEmit)
 pnpm build         # electron-vite / turbo 构建
 pnpm verify:uiohook   # 原生鼠标钩子产物自检(改了原生模块/补丁时必跑)
 ```
 
-> 若 `pnpm lint`(turbo)在本机卡住或报 `exited (126)`,这是 turbo 在本机执行环境的
-> 问题(不是代码问题),改用 pnpm 递归校验即可,效果等价:
+> **本机不要用 `turbo run lint`**(根 `lint` 脚本已改为 `pnpm -r run lint`,不再经过 turbo)。
+> 在 Windows + Volta/corepack 环境下,turbo 逐包调 `pnpm run lint` 会退化成**无限递归**:
+> `pnpm.exe run lint` → `cmd.exe /C pnpm run lint` → 下一级,pnpm/cmd 进程每秒涨几十个,
+> 几分钟堆到上万个、内存吃满(2026-11-18 事故,见 `scripts/kill-runaway-lint.ps1` 头部说明)。
 >
 > ```bash
-> pnpm -r run lint            # 全部包
+> pnpm lint                         # = pnpm -r run lint,全部工作区(推荐)
 > pnpm --filter @c30/teacher lint   # 单个包
+> ```
+>
+> 若发现任务管理器里 cmd.exe / pnpm.exe 数量暴涨、内存被吃满,立即清理:
+>
+> ```bash
+> pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/kill-runaway-lint.ps1
 > ```
 
 改了原生模块(`patches/uiohook-napi.patch`)时,还要:
