@@ -523,27 +523,30 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', ...backgroundFor(theme) }}>
-        {/* 图片底图(教师端「插入白板」同步过来):放在 canvas 之前,
-            与 canvas 同为定位元素时按 DOM 顺序绘制 → 图片在下、笔迹在上。 */}
+        {/* 图片分两层渲染(与教师端一致):
+            · 底图(未置顶)在 canvas 之前 → 笔迹压在上面;
+            · 置顶图(aboveStrokes)在 canvas 之后 → 盖住笔迹。 */}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-          {sortImagesByZ(images).map((img) => (
-            <img
-              key={img.id}
-              src={img.src}
-              alt=""
-              draggable={false}
-              style={{
-                position: 'absolute',
-                left: img.x,
-                top: img.y,
-                width: img.w,
-                height: img.h,
-                objectFit: 'contain',
-                pointerEvents: 'none',
-                userSelect: 'none',
-              }}
-            />
-          ))}
+          {sortImagesByZ(images)
+            .filter((img) => !img.aboveStrokes)
+            .map((img) => (
+              <img
+                key={img.id}
+                src={img.src}
+                alt=""
+                draggable={false}
+                style={{
+                  position: 'absolute',
+                  left: img.x,
+                  top: img.y,
+                  width: img.w,
+                  height: img.h,
+                  objectFit: 'contain',
+                  pointerEvents: 'none',
+                  userSelect: 'none',
+                }}
+              />
+            ))}
         </div>
 
         <canvas
@@ -565,6 +568,32 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
             touchAction: 'none',
           }}
         />
+
+        {/* 置顶图片层:在 canvas 之后 → 盖住笔迹(与教师端「置顶到笔迹之上」一致) */}
+        {images.some((img) => img.aboveStrokes) && (
+          <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+            {sortImagesByZ(images)
+              .filter((img) => img.aboveStrokes)
+              .map((img) => (
+                <img
+                  key={img.id}
+                  src={img.src}
+                  alt=""
+                  draggable={false}
+                  style={{
+                    position: 'absolute',
+                    left: img.x,
+                    top: img.y,
+                    width: img.w,
+                    height: img.h,
+                    objectFit: 'contain',
+                    pointerEvents: 'none',
+                    userSelect: 'none',
+                  }}
+                />
+              ))}
+          </div>
+        )}
 
         <DanmakuLayer danmakuList={danmakuList} />
 

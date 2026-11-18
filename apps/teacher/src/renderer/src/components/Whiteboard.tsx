@@ -14,7 +14,7 @@ import type {
   PenType,
 } from '@c30/shared';
 import { PEN_DEFAULT_OPACITY, sortImagesByZ } from '@c30/shared';
-import { ArrowUpToLine, ArrowDownToLine, Copy, Trash2 } from 'lucide-react';
+import { ArrowUpToLine, ArrowDownToLine, Copy, Trash2, Lock, Unlock, RotateCw, Crop } from 'lucide-react';
 import { CanvasRenderer } from './Renderer';
 import {
   eraserRectAt,
@@ -537,18 +537,30 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  // ---- 图片编辑:命中 / 更新 / 置顶 / 复制 / 删除 ----
+  // ---- 图片编辑:命中 / 更新 / 置顶 / 锁定 / 旋转 / 裁剪 / 复制 / 删除 ----
   /** 当前选中的图片(选中态只存 id,尺寸/位置从最新数组里取,拖动时始终是活的) */
   const selectedImage = imageSel ? imagesRef.current.find((im) => im.id === imageSel) ?? null : null;
   const imageBox = selectedImage
     ? { x: selectedImage.x, y: selectedImage.y, w: selectedImage.w, h: selectedImage.h }
     : null;
-  /** 当前最上层的图片 id:操作条据此在「置顶 / 取消置顶」之间切换 */
-  const topImageId = sortImagesByZ(images).at(-1)?.id;
+  /** 该图片是否已置顶到笔迹之上(操作条据此在「置顶 / 取消置顶」之间切换) */
+  const isPinned = selectedImage?.aboveStrokes === true;
+  /** 裁剪中:矩形用画布坐标;id 记录正在裁剪的图片 */
+  const [cropRect, setCropRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const cropDragRef = useRef<{
+    mode: 'move' | 'nw' | 'ne' | 'sw' | 'se';
+    startX: number;
+    startY: number;
+    orig: { x: number; y: number; w: number; h: number };
+  } | null>(null);
 
-  /** 命中测试:从最上层(z 最大)往下找第一张包含该点的图片 */
+  /** 命中测试:置顶的图(在笔迹之上)永远比底图优先,同类里 z 大的优先 */
+  const orderedImages = () =>
+    sortImagesByZ(imagesRef.current).sort(
+      (a, b) => Number(!!a.aboveStrokes) - Number(!!b.aboveStrokes),
+    );
   const hitImageAt = (x: number, y: number): ImageItem | null => {
-    const list = sortImagesByZ(imagesRef.current);
+    const list = orderedImages();
     for (let i = list.length - 1; i >= 0; i--) {
       const im = list[i];
       if (x >= im.x && x <= im.x + im.w && y >= im.y && y <= im.y + im.h) return im;
@@ -582,33 +594,218 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     emit({ type: 'image.update', payload: next });
   };
 
-  /** 置顶 / 取消置顶:在「图片最上层」与「原来的层序」之间切换(可撤销) */
+  /**
+   * 置顶 / 取消置顶:
+   *   置顶 = 这张图渲染到**笔迹之上**(会盖住已有笔迹),同时 z 提到同层最大;
+   *   取消置顶 = 回到笔迹之下(底图),层序回到置顶前(记不到就放最下层)。
+   * 两种操作都可撤销。
+   */
   const pinnedPrevZRef = useRef<Map<string, number>>(new Map());
   const toggleImageFront = useCallback(
     (id: string) => {
       const im = imagesRef.current.find((x) => x.id === id);
       if (!im) return;
-      const list = sortImagesByZ(imagesRef.current);
-      const isTop = list[list.length - 1]?.id === id;
       const before: ImageItem = { ...im };
-      let nextZ: number;
-      if (isTop) {
-        // 取消置顶:回到置顶前的层序(记不到就放到最下面)
+      const list = sortImagesByZ(imagesRef.current);
+      let after: ImageItem;
+      if (im.aboveStrokes) {
         const prev = pinnedPrevZRef.current.get(id);
         const minZ = list.reduce((m, it) => Math.min(m, it.z ?? it.seq ?? 0), Number.POSITIVE_INFINITY);
-        nextZ = prev ?? (Number.isFinite(minZ) ? minZ - 1 : 0);
         pinnedPrevZRef.current.delete(id);
+        after = {
+          ...im,
+          aboveStrokes: false,
+          z: prev ?? (Number.isFinite(minZ) ? minZ - 1 : 0),
+        };
       } else {
         pinnedPrevZRef.current.set(id, im.z ?? im.seq ?? 0);
-        nextZ = list.reduce((m, it) => Math.max(m, it.z ?? it.seq ?? 0), 0) + 1;
+        after = {
+          ...im,
+          aboveStrokes: true,
+          z: list.reduce((m, it) => Math.max(m, it.z ?? it.seq ?? 0), 0) + 1,
+        };
       }
-      const after: ImageItem = { ...im, z: nextZ };
       applyImageLocal(after);
       emit({ type: 'image.update', payload: after });
       pushImageOp({ kind: 'image.update', imageBefore: before, imageAfter: after });
     },
     [emit],
   );
+
+  /** 锁定 / 解锁:锁定后不能拖动/缩放,边框显示红色 */
+  const toggleImageLock = useCallback(
+    (id: string) => {
+      const im = imagesRef.current.find((x) => x.id === id);
+      if (!im) return;
+      const before: ImageItem = { ...im };
+      const after: ImageItem = { ...im, locked: !im.locked };
+      applyImageLocal(after);
+      emit({ type: 'image.update', payload: after });
+      pushImageOp({ kind: 'image.update', imageBefore: before, imageAfter: after });
+    },
+    [emit],
+  );
+
+  /** 图片加工的统一落地:替换 src / 位置 / 尺寸,并广播 + 记撤销 */
+  const applyImageEdit = useCallback(
+    (before: ImageItem, patch: Partial<ImageItem>) => {
+      const after: ImageItem = { ...before, ...patch };
+      applyImageLocal(after);
+      emit({ type: 'image.update', payload: after });
+      pushImageOp({ kind: 'image.update', imageBefore: before, imageAfter: after });
+      return after;
+    },
+    [emit],
+  );
+
+  /** 把图片按 canvas 加工:传入绘制函数,返回新的 dataURL(用于旋转 / 裁剪) */
+  const bakeImage = useCallback(async (src: string, w: number, h: number, draw: (ctx: CanvasRenderingContext2D, img: HTMLImageElement) => void) => {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('图片加载失败'));
+      el.src = src;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w));
+    canvas.height = Math.max(1, Math.round(h));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return src;
+    draw(ctx, img);
+    return canvas.toDataURL('image/png');
+  }, []);
+
+  /** 旋转 90°(顺时针,直接烘焙进图片,避免再引入一套旋转矩阵) */
+  const rotateImage = useCallback(
+    async (id: string) => {
+      const im = imagesRef.current.find((x) => x.id === id);
+      if (!im) return;
+      try {
+        const src = await bakeImage(im.src, im.h, im.w, (ctx, img) => {
+          ctx.translate(im.h / 2, im.w / 2);
+          ctx.rotate(Math.PI / 2);
+          ctx.drawImage(img, -im.w / 2, -im.h / 2, im.w, im.h);
+        });
+        // 绕中心旋转:宽高互换,中心点不动
+        const cx = im.x + im.w / 2;
+        const cy = im.y + im.h / 2;
+        applyImageEdit(im, {
+          src,
+          w: im.h,
+          h: im.w,
+          x: Math.round(cx - im.h / 2),
+          y: Math.round(cy - im.w / 2),
+        });
+      } catch {
+        /* 加载失败就放弃这次旋转 */
+      }
+    },
+    [applyImageEdit, bakeImage],
+  );
+
+  /** 进入裁剪:裁剪框初始 = 整张图(画布坐标) */
+  const startCrop = useCallback((id: string) => {
+    const im = imagesRef.current.find((x) => x.id === id);
+    if (!im) return;
+    setCropRect({ x: im.x, y: im.y, w: im.w, h: im.h });
+  }, []);
+
+  const cancelCrop = useCallback(() => {
+    cropDragRef.current = null;
+    setCropRect(null);
+  }, []);
+
+  /** 确认裁剪:按裁剪框从当前图里取出那一块,烘焙成新图(位置/尺寸同步收窄) */
+  const confirmCrop = useCallback(async () => {
+    const rect = cropRect;
+    const im = imageSel ? imagesRef.current.find((x) => x.id === imageSel) : null;
+    if (!rect || !im) {
+      setCropRect(null);
+      return;
+    }
+    const relX = Math.max(0, (rect.x - im.x) / im.w);
+    const relY = Math.max(0, (rect.y - im.y) / im.h);
+    const relW = Math.min(1 - relX, Math.max(0.02, rect.w / im.w));
+    const relH = Math.min(1 - relY, Math.max(0.02, rect.h / im.h));
+    try {
+      const outW = Math.max(1, Math.round(im.w * relW));
+      const outH = Math.max(1, Math.round(im.h * relH));
+      const src = await bakeImage(im.src, outW, outH, (ctx, img) => {
+        ctx.drawImage(
+          img,
+          relX * img.naturalWidth,
+          relY * img.naturalHeight,
+          relW * img.naturalWidth,
+          relH * img.naturalHeight,
+          0,
+          0,
+          outW,
+          outH,
+        );
+      });
+      applyImageEdit(
+        imagesRef.current.find((x) => x.id === im.id) ?? im,
+        {
+          src,
+          x: Math.round(im.x + im.w * relX),
+          y: Math.round(im.y + im.h * relY),
+          w: outW,
+          h: outH,
+        },
+      );
+    } catch {
+      /* 加载失败:保持原图 */
+    }
+    cropDragRef.current = null;
+    setCropRect(null);
+  }, [applyImageEdit, bakeImage, cropRect, imageSel]);
+
+  /** 裁剪框的手势:四角等比?这里自由裁(四角只动一角),框内拖动整体平移 */
+  const startCropDrag = (mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = cropRect;
+    const im = imageSel ? imagesRef.current.find((x) => x.id === imageSel) : null;
+    if (!rect || !im) return;
+    const toLocal = (clientX: number, clientY: number) => {
+      const canvas = canvasRef.current!;
+      const cr = canvas.getBoundingClientRect();
+      return { x: clientX - cr.left, y: clientY - cr.top };
+    };
+    const start = toLocal(e.clientX, e.clientY);
+    cropDragRef.current = { mode, startX: start.x, startY: start.y, orig: rect };
+    const MIN = 32;
+    const onMove = (ev: PointerEvent) => {
+      const cur = toLocal(ev.clientX, ev.clientY);
+      const dx = cur.x - start.x;
+      const dy = cur.y - start.y;
+      const o = cropDragRef.current?.orig;
+      if (!o) return;
+      let next = { ...o };
+      if (mode === 'move') {
+        next.x = Math.min(Math.max(im.x, o.x + dx), im.x + im.w - o.w);
+        next.y = Math.min(Math.max(im.y, o.y + dy), im.y + im.h - o.h);
+      } else {
+        let x1 = o.x;
+        let y1 = o.y;
+        let x2 = o.x + o.w;
+        let y2 = o.y + o.h;
+        if (mode.includes('w')) x1 = Math.min(Math.max(im.x, o.x + dx), x2 - MIN);
+        if (mode.includes('e')) x2 = Math.max(Math.min(im.x + im.w, o.x + o.w + dx), x1 + MIN);
+        if (mode.includes('n')) y1 = Math.min(Math.max(im.y, o.y + dy), y2 - MIN);
+        if (mode.includes('s')) y2 = Math.max(Math.min(im.y + im.h, o.y + o.h + dy), y1 + MIN);
+        next = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+      }
+      setCropRect(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
 
   /** 复制:错开 24px 贴一张新图(z 取最大),并直接选中新图 */
   const duplicateImage = useCallback(
@@ -646,23 +843,27 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     [emit],
   );
 
-  // 键盘:Delete / Backspace 删除选中图片,Esc 取消选中
+  // 键盘:Delete / Backspace 删除选中图片,Esc 取消选中(裁剪中 Esc 取消裁剪)
   useEffect(() => {
     if (!imageSel) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       // 正在输入框里打字时不抢键
       if (t && t.closest('input, textarea, [contenteditable="true"]')) return;
+      if (e.key === 'Escape') {
+        if (cropRect) cancelCrop();
+        else setImageSel(null);
+        return;
+      }
+      if (cropRect) return; // 裁剪中不响应删除,避免误删正在裁的图
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
         removeImage(imageSel);
-      } else if (e.key === 'Escape') {
-        setImageSel(null);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [imageSel, removeImage]);
+  }, [imageSel, removeImage, cropRect, cancelCrop]);
 
   // 计算一组笔画的包围盒
   const computeBounds = (strokes: Stroke[]) => {
@@ -738,12 +939,17 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       return;
     }
     if (t.activeTool === 'select') {
-      // 交互约定:图片必须**先选中**才会出现定位框,也只有选中后才能拖动/缩放。
-      // ① 已选中的图片:点手柄 = 缩放,点框内 = 移动
+      // 裁剪中:画布上的按下不参与选择(裁剪框自己处理手势)
+      if (cropRect) return;
+      // ① 已选中图片:点手柄 = 缩放,点框内 = 移动(锁定的图只能改选中,不能拖)
       if (selectedImage) {
         const box = { x: selectedImage.x, y: selectedImage.y, w: selectedImage.w, h: selectedImage.h };
         const handle = hitHandle(box, x, y);
         if (handle) {
+          if (selectedImage.locked) {
+            // 锁定:按在图上只保持选中,不进入拖动
+            return;
+          }
           imageDragRef.current = {
             mode: handle,
             id: selectedImage.id,
@@ -758,14 +964,24 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
           return;
         }
       }
-      // ② 点到「未选中」的图片:本次只做选中(不跟手移动),再拖才会动
+      // ② 点到图片(含未选中):直接选中,并在未锁定时立刻进入拖动
       const hit = hitImageAt(x, y);
       if (hit) {
         setImageSel(hit.id);
         setSelection(null);
         setRubberBand(null);
         transformRef.current = null;
-        imageDragRef.current = null;
+        if (!hit.locked) {
+          imageDragRef.current = {
+            mode: 'move',
+            id: hit.id,
+            startX: x,
+            startY: y,
+            orig: { x: hit.x, y: hit.y, w: hit.w, h: hit.h },
+            ratio: hit.h > 0 ? hit.w / hit.h : 1,
+          };
+          canvasRef.current?.setPointerCapture(e.pointerId);
+        }
         return;
       }
       // ③ 点到空白:取消图片选中
@@ -1232,28 +1448,31 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', ...backgroundFor(theme) }}>
-        {/* 图片底图(聚焦「插入白板」):放在 canvas 之前,
-            与 canvas 同为「定位元素」时按 DOM 顺序绘制 → 图片在下、笔迹在上,
-            画笔/板擦可以正常覆盖到图片上方。 */}
+        {/* 图片分两层渲染:
+            · 底图(未置顶)在 canvas 之前 → 笔迹压在上面,可以正常批注;
+            · 置顶图(aboveStrokes)在 canvas 之后 → 盖住已有笔迹,满足「置顶到笔迹之上」。
+            两层都用 SortImagesByZ 排序,同类之间按 z 叠放。 */}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-          {sortImagesByZ(images).map((img) => (
-            <img
-              key={img.id}
-              src={img.src}
-              alt=""
-              draggable={false}
-              style={{
-                position: 'absolute',
-                left: img.x,
-                top: img.y,
-                width: img.w,
-                height: img.h,
-                objectFit: 'contain',
-                pointerEvents: 'none',
-                userSelect: 'none',
-              }}
-            />
-          ))}
+          {sortImagesByZ(images)
+            .filter((img) => !img.aboveStrokes)
+            .map((img) => (
+              <img
+                key={img.id}
+                src={img.src}
+                alt=""
+                draggable={false}
+                style={{
+                  position: 'absolute',
+                  left: img.x,
+                  top: img.y,
+                  width: img.w,
+                  height: img.h,
+                  objectFit: 'contain',
+                  pointerEvents: 'none',
+                  userSelect: 'none',
+                }}
+              />
+            ))}
         </div>
 
         <canvas
@@ -1279,6 +1498,32 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
             touchAction: 'none',
           }}
         />
+
+        {/* 置顶图片层:在 canvas 之后 → 盖住已有笔迹(「置顶到笔迹之上」) */}
+        {images.some((img) => img.aboveStrokes) && (
+          <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+            {sortImagesByZ(images)
+              .filter((img) => img.aboveStrokes)
+              .map((img) => (
+                <img
+                  key={img.id}
+                  src={img.src}
+                  alt=""
+                  draggable={false}
+                  style={{
+                    position: 'absolute',
+                    left: img.x,
+                    top: img.y,
+                    width: img.w,
+                    height: img.h,
+                    objectFit: 'contain',
+                    pointerEvents: 'none',
+                    userSelect: 'none',
+                  }}
+                />
+              ))}
+          </div>
+        )}
 
         {/* 矩形白板擦:只有「按下鼠标」擦除时才生成,松开立即消失;
             位置与尺寸直接由擦除判定用的矩形算出,保证「看到的就是擦到的」。 */}
@@ -1323,20 +1568,36 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
           <SelectionBox box={selection} scale={uiScale} />
         )}
 
-        {/* 图片选中:蓝色框 + 8 个手柄(拖动移动、四角等比缩放),
-            框上方浮出操作条:置顶/取消置顶 · 复制 · 删除 */}
-        {isTeacher && imageBox && selectedImage && (
+        {/* 图片选中:定位框 + 操作条(置顶 / 锁定 / 旋转 / 裁剪 / 复制 / 删除)。
+            锁定时定位框与手柄变红,且不能拖动。裁剪中则显示裁剪框与「确定/取消」。 */}
+        {isTeacher && imageBox && selectedImage && !cropRect && (
           <>
-            <SelectionBox box={imageBox} scale={uiScale} />
+            <SelectionBox box={imageBox} scale={uiScale} locked={selectedImage.locked} />
             <ImageActionBar
               box={imageBox}
               scale={uiScale}
-              pinned={topImageId === selectedImage.id}
+              pinned={isPinned}
+              locked={selectedImage.locked === true}
               onToggleFront={() => toggleImageFront(selectedImage.id)}
+              onToggleLock={() => toggleImageLock(selectedImage.id)}
+              onRotate={() => void rotateImage(selectedImage.id)}
+              onCrop={() => startCrop(selectedImage.id)}
               onDuplicate={() => duplicateImage(selectedImage.id)}
               onDelete={() => removeImage(selectedImage.id)}
             />
           </>
+        )}
+
+        {/* 裁剪模式 */}
+        {isTeacher && selectedImage && cropRect && (
+          <CropOverlay
+            imageBox={{ x: selectedImage.x, y: selectedImage.y, w: selectedImage.w, h: selectedImage.h }}
+            rect={cropRect}
+            scale={uiScale}
+            onStartDrag={startCropDrag}
+            onConfirm={() => void confirmCrop()}
+            onCancel={cancelCrop}
+          />
         )}
 
         <DanmakuLayer danmakuList={danmakuList} />
@@ -1485,26 +1746,34 @@ export default Whiteboard;
 export { COLORS };
 
 // 图片操作条:选中图片后浮在框上方(上方放不下就挪到下方)。
-// 图片操作条:置顶/取消置顶(按当前层序切换)· 复制 · 删除。
-// 置顶 = 压在其他图片之上;取消置顶 = 回到置顶前的层序。
+// 置顶 = 放到笔迹与其他图片之上;锁定 = 禁止拖动(框变红);旋转/裁剪 = 就地加工图片。
 function ImageActionBar({
   box,
   scale,
   pinned,
+  locked,
   onToggleFront,
+  onToggleLock,
+  onRotate,
+  onCrop,
   onDuplicate,
   onDelete,
 }: {
   box: { x: number; y: number; w: number; h: number };
   scale: number;
-  /** 该图片当前是否已在最上层 → 按钮显示「取消置顶」 */
+  /** 是否已置顶到笔迹之上 → 按钮显示「取消置顶」 */
   pinned: boolean;
+  /** 是否已锁定 → 按钮显示「解锁」,边框变红 */
+  locked: boolean;
   onToggleFront: () => void;
+  onToggleLock: () => void;
+  onRotate: () => void;
+  onCrop: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
   const px = (n: number) => scaled(n, scale);
-  const barW = px(268);
+  const barW = px(520);
   const barH = px(40);
   const gap = px(10);
   const above = box.y - barH - gap >= 8;
@@ -1577,20 +1846,203 @@ function ImageActionBar({
     >
       <Btn
         label={pinned ? '取消置顶' : '置顶'}
-        title={pinned ? '取消置顶：回到原来的层序' : '置顶：压在其他图片之上'}
+        title={pinned ? '取消置顶：回到笔迹之下' : '置顶：放到笔迹之上'}
         Icon={pinned ? ArrowDownToLine : ArrowUpToLine}
         active={pinned}
         onClick={onToggleFront}
       />
+      <Btn
+        label={locked ? '解锁' : '锁定'}
+        title={locked ? '解锁：允许拖动这张图' : '锁定：不能再拖动这张图'}
+        Icon={locked ? Unlock : Lock}
+        active={locked}
+        onClick={onToggleLock}
+      />
+      <Btn label="旋转" title="顺时针旋转 90°" Icon={RotateCw} onClick={onRotate} />
+      <Btn label="裁剪" title="裁剪图片" Icon={Crop} onClick={onCrop} />
       <Btn label="复制" Icon={Copy} onClick={onDuplicate} />
       <Btn label="删除" Icon={Trash2} onClick={onDelete} danger />
     </div>
   );
 }
 
-// 选择变换框:蓝色边框 + 8 个手柄(四角 + 四边中点)
-function SelectionBox({ box, scale }: { box: { x: number; y: number; w: number; h: number }; scale: number }) {
+// 裁剪模式:图片范围内压暗 + 虚线裁剪框 + 四角手柄 + 「取消 / 确定」。
+function CropOverlay({
+  imageBox,
+  rect,
+  scale,
+  onStartDrag,
+  onConfirm,
+  onCancel,
+}: {
+  imageBox: { x: number; y: number; w: number; h: number };
+  rect: { x: number; y: number; w: number; h: number };
+  scale: number;
+  onStartDrag: (mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => (e: React.PointerEvent) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const px = (n: number) => scaled(n, scale);
+  const H = Math.max(12, Math.round(12 * scale));
+  const corners: { key: 'nw' | 'ne' | 'sw' | 'se'; left: number; top: number; cursor: string }[] = [
+    { key: 'nw', left: rect.x - H / 2, top: rect.y - H / 2, cursor: 'nwse-resize' },
+    { key: 'ne', left: rect.x + rect.w - H / 2, top: rect.y - H / 2, cursor: 'nesw-resize' },
+    { key: 'sw', left: rect.x - H / 2, top: rect.y + rect.h - H / 2, cursor: 'nesw-resize' },
+    { key: 'se', left: rect.x + rect.w - H / 2, top: rect.y + rect.h - H / 2, cursor: 'nwse-resize' },
+  ];
+  const barW = px(190);
+  const barTop = rect.y + rect.h + px(10);
+  const barLeft = Math.max(8, Math.min(rect.x + rect.w - barW, window.innerWidth - barW - 8));
+
+  return (
+    <>
+      {/* 图片范围内压暗,裁剪框内保持原亮度 */}
+      <div
+        aria-hidden
+        style={{
+          position: 'absolute',
+          left: imageBox.x,
+          top: imageBox.y,
+          width: imageBox.w,
+          height: imageBox.h,
+          overflow: 'hidden',
+          pointerEvents: 'none',
+          zIndex: 18,
+        }}
+      >
+        <div
+          style={{
+            position: 'absolute',
+            left: rect.x - imageBox.x,
+            top: rect.y - imageBox.y,
+            width: rect.w,
+            height: rect.h,
+            boxShadow: '0 0 0 9999px rgba(0,0,0,0.45)',
+          }}
+        />
+      </div>
+
+      {/* 裁剪框本体:虚线边 + 框内拖动整体平移 */}
+      <div
+        data-interactive
+        onPointerDown={onStartDrag('move')}
+        style={{
+          position: 'absolute',
+          left: rect.x,
+          top: rect.y,
+          width: rect.w,
+          height: rect.h,
+          border: `${px(1.5)}px dashed #ffffff`,
+          boxShadow: '0 0 0 1px rgba(0,0,0,0.55)',
+          cursor: 'move',
+          pointerEvents: 'auto',
+          zIndex: 19,
+        }}
+      >
+        {/* 三分线(构图辅助) */}
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          {[1, 2].map((i) => (
+            <div key={`v${i}`} style={{ position: 'absolute', left: `${(i * 100) / 3}%`, top: 0, bottom: 0, width: 1, background: 'rgba(255,255,255,0.35)' }} />
+          ))}
+          {[1, 2].map((i) => (
+            <div key={`h${i}`} style={{ position: 'absolute', top: `${(i * 100) / 3}%`, left: 0, right: 0, height: 1, background: 'rgba(255,255,255,0.35)' }} />
+          ))}
+        </div>
+      </div>
+
+      {/* 四角手柄 */}
+      {corners.map((c) => (
+        <div
+          key={c.key}
+          data-interactive
+          onPointerDown={onStartDrag(c.key)}
+          style={{
+            position: 'absolute',
+            left: c.left,
+            top: c.top,
+            width: H,
+            height: H,
+            background: '#ffffff',
+            border: `1.5px solid #2563eb`,
+            borderRadius: 2,
+            boxSizing: 'border-box',
+            cursor: c.cursor,
+            pointerEvents: 'auto',
+            zIndex: 20,
+          }}
+        />
+      ))}
+
+      {/* 取消 / 确定 */}
+      <div
+        data-interactive
+        style={{
+          position: 'absolute',
+          left: barLeft,
+          top: barTop,
+          width: barW,
+          display: 'flex',
+          gap: px(8),
+          padding: px(4),
+          background: 'rgba(27,27,31,0.95)',
+          borderRadius: px(12),
+          boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          zIndex: 21,
+          pointerEvents: 'auto',
+        }}
+      >
+        <button
+          onClick={onCancel}
+          style={{
+            flex: 1,
+            padding: `${px(7)}px 0`,
+            borderRadius: px(9),
+            border: 'none',
+            background: 'transparent',
+            color: '#e5e7eb',
+            fontSize: px(12),
+            cursor: 'pointer',
+            outline: 'none',
+          }}
+        >
+          取消
+        </button>
+        <button
+          onClick={onConfirm}
+          style={{
+            flex: 1,
+            padding: `${px(7)}px 0`,
+            borderRadius: px(9),
+            border: 'none',
+            background: '#2563eb',
+            color: '#ffffff',
+            fontSize: px(12),
+            fontWeight: 600,
+            cursor: 'pointer',
+            outline: 'none',
+          }}
+        >
+          确定
+        </button>
+      </div>
+    </>
+  );
+}
+
+// 选择变换框:蓝色边框 + 8 个手柄(四角 + 四边中点);锁定时整框变红且手柄变暗
+function SelectionBox({
+  box,
+  scale,
+  locked,
+}: {
+  box: { x: number; y: number; w: number; h: number };
+  scale: number;
+  locked?: boolean;
+}) {
   const H = Math.max(9, Math.round(9 * scale)); // 手柄尺寸(随浮层缩放)
+  // 锁定:边框与手柄变红,提示「这张图现在拖不动」
+  const stroke = locked ? '#ef4444' : '#3b82f6';
   const handles: { key: string; left: number; top: number; cursor: string }[] = [
     { key: 'nw', left: box.x - H / 2, top: box.y - H / 2, cursor: 'nwse-resize' },
     { key: 'n', left: box.x + box.w / 2 - H / 2, top: box.y - H / 2, cursor: 'ns-resize' },
@@ -1610,7 +2062,9 @@ function SelectionBox({ box, scale }: { box: { x: number; y: number; w: number; 
           top: box.y,
           width: box.w,
           height: box.h,
-          border: '1px solid #3b82f6',
+          border: `1px solid ${stroke}`,
+          // 锁定态用红色描边强调,并稍微加粗
+          boxShadow: locked ? `0 0 0 2px rgba(239,68,68,0.35)` : 'none',
           boxSizing: 'border-box',
           pointerEvents: 'none',
         }}
@@ -1624,12 +2078,13 @@ function SelectionBox({ box, scale }: { box: { x: number; y: number; w: number; 
             top: h.top,
             width: H,
             height: H,
-            background: '#fff',
-            border: '1.5px solid #3b82f6',
+            background: locked ? '#fee2e2' : '#fff',
+            border: `1.5px solid ${stroke}`,
             borderRadius: 2,
             boxSizing: 'border-box',
             pointerEvents: 'none',
             cursor: h.cursor,
+            opacity: locked ? 0.85 : 1,
           }}
         />
       ))}
