@@ -28,21 +28,24 @@
 
 ```bash
 pnpm lint          # = pnpm -r run lint(各 workspace 跑 tsc --noEmit)
-pnpm build         # electron-vite / turbo 构建
+pnpm build         # 各包构建(electron-vite / tsc / cmake-js)
 pnpm verify:uiohook   # 原生鼠标钩子产物自检(改了原生模块/补丁时必跑)
 ```
 
-> **本机不要用 `turbo run lint`**(根 `lint` 脚本已改为 `pnpm -r run lint`,不再经过 turbo)。
-> 在 Windows + Volta/corepack 环境下,turbo 逐包调 `pnpm run lint` 会退化成**无限递归**:
-> `pnpm.exe run lint` → `cmd.exe /C pnpm run lint` → 下一级,pnpm/cmd 进程每秒涨几十个,
-> 几分钟堆到上万个、内存吃满(2026-11-18 事故,见 `scripts/kill-runaway-lint.ps1` 头部说明)。
+> 多包任务一律用 pnpm 原生命令(仓库已于 2026-11-18 移除 turbo):
 >
 > ```bash
-> pnpm lint                         # = pnpm -r run lint,全部工作区(推荐)
+> pnpm build                        # = pnpm -r run build(按工作区拓扑序,不含原生 addon)
+> pnpm build:native                 # 单独构建 @c30/whiteboard-native(需要 cmake)
+> pnpm dev                          # = pnpm -r --parallel run dev
+> pnpm lint                         # = pnpm -r run lint
 > pnpm --filter @c30/teacher lint   # 单个包
 > ```
 >
-> 若发现任务管理器里 cmd.exe / pnpm.exe 数量暴涨、内存被吃满,立即清理:
+> 历史坑:此前的 `turbo run lint` 在 Windows + Volta/corepack 环境下会退化成**无限递归**
+> (`pnpm.exe run lint` → `cmd.exe /C pnpm run lint` → 下一级,pnpm/cmd 进程每秒涨几十个,
+> 几分钟堆到上万个、内存吃满,2026-11-18 事故)。turbo 已移除,正常使用不会再触发;
+> 若从旧脚本/旧习惯里又跑起类似的失控进程链,用应急脚本清理:
 >
 > ```bash
 > pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/kill-runaway-lint.ps1

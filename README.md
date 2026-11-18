@@ -19,7 +19,7 @@
 | 局域网发现 | mDNS |
 | 实时同步 | socket.io(发送端内嵌服务) |
 | 白板核心 | C++(N-API)+ Canvas 兜底 |
-| 仓库 | monorepo + pnpm workspace + turbo |
+| 仓库 | monorepo + pnpm workspace |
 | 版本管理 | Changesets |
 
 ## 目录结构

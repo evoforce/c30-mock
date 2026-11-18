@@ -6,11 +6,11 @@
   "description": "仿照教培软件 C30 教师端/学生端的局域网互动教学系统",
   "scripts": {
     "postinstall": "node scripts/rebuild-uiohook.mjs --if-needed",
-    "build": "turbo run build",
-    "build:win": "turbo run build:win",
-    "dev": "turbo run dev",
+    "build": "pnpm -r --filter=!@c30/whiteboard-native run build",
+    "build:native": "pnpm --filter @c30/whiteboard-native run build",
+    "build:win": "pnpm -r run build:win",
+    "dev": "pnpm -r --parallel run dev",
     "lint": "pnpm -r run lint",
-    "test": "turbo run test",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
@@ -18,8 +18,7 @@
     "verify:uiohook": "node scripts/verify-uiohook.mjs --strict"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.27.10",
-    "turbo": "^2.3.0"
+    "@changesets/cli": "^2.27.10"
   },
   "engines": {
     "node": ">=20",
