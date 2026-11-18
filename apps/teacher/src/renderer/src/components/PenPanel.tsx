@@ -1,16 +1,15 @@
-import { useState } from 'react';
 import type { PenType } from '@c30/shared';
 import { Brush, Pencil, Highlighter, Check, Palette } from 'lucide-react';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
-import ColorWheel from './ColorWheel';
 
 // 画笔设置面板(底部工具条「画笔」菜单):黑色浮层风格,与底部工具栏一致。
-// 三行:笔形(毛笔/铅笔/马克笔) + 粗细(4档) + 颜色(两排色块 + 颜色盘)。
+// 三行:笔形(毛笔/铅笔/马克笔) + 粗细(4档) + 颜色(两排色块 + 颜色盘入口)。
 // 尺寸全部按 useOverlayScale 动态缩放(大屏更大更好点),选中项用「实心蓝底 + 白字」
 // 与右上角对勾双重标识,老师一眼就能看出当前用的是哪种笔/多粗/什么颜色。
 //
-// 颜色行最后一枚彩虹色块 = 打开「颜色盘」(自定义取色):圆盘选色相/饱和度 + 竖条调明暗,
-// 拖动实时生效;选中自定义颜色后该色块显示当前色,方便确认。
+// 颜色行最后一枚彩虹色块 = 打开「颜色盘」。颜色盘是**独立的浮层**(由 BottomToolbar
+// 渲染在画笔面板右侧),不塞在本面板里 —— 面板高度因此固定,展开/取色时不会再
+// 上下长高、把整个菜单顶得上下抖动。
 
 const PEN_TYPES: { key: PenType | 'highlighter'; label: string; Icon: typeof Brush }[] = [
   { key: 'brush', label: '毛笔', Icon: Brush },
@@ -22,8 +21,8 @@ const PEN_TYPES: { key: PenType | 'highlighter'; label: string; Icon: typeof Bru
 const COLORS_ROW1 = ['#ffffff', '#1f2937', '#2563eb', '#16a34a', '#f59e0b', '#e5484d'];
 const COLORS_ROW2 = ['#f97316', '#ec4899', '#a855f7', '#84cc16', '#14b8a6'];
 const PRESET_COLORS = new Set([...COLORS_ROW1, ...COLORS_ROW2]);
-/** 打开颜色盘时圆盘默认停在紫色,避免一进来就是全白/全黑 */
-const DEFAULT_CUSTOM_COLOR = '#a855f7';
+/** 粗细档位文案:不用「1/2/3/4 档」这种工程说法 */
+const PEN_WIDTH_LABELS = ['细', '中', '粗', '特粗'] as const;
 
 export interface PenConfig {
   penType: PenType | 'highlighter';
@@ -34,9 +33,15 @@ export interface PenConfig {
 export default function PenPanel({
   config,
   onChange,
+  pickerOpen,
+  onTogglePicker,
 }: {
   config: PenConfig;
   onChange: (c: PenConfig) => void;
+  /** 颜色盘浮层是否展开(浮层本身由 BottomToolbar 渲染在右侧) */
+  pickerOpen: boolean;
+  /** 点击色块 = 展开/收起颜色盘浮层 */
+  onTogglePicker: () => void;
 }) {
   const s = useOverlayScale();
   const px = (n: number) => scaled(n, s);
@@ -44,13 +49,8 @@ export default function PenPanel({
   const WIDTH_LEVELS = [3, 6, 10, 16];
   const width = px(400);
 
-  // 颜色盘展开状态 + 圆盘上一次取到的颜色(点预设色后回到圆盘时保持原位置)
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [wheelColor, setWheelColor] = useState(DEFAULT_CUSTOM_COLOR);
-
   // 当前画笔颜色是否属于「自定义色」(不在预设里):是则彩虹色块显示该色并标记选中
   const isCustomColor = !PRESET_COLORS.has(config.color.toLowerCase());
-  const customColor = isCustomColor ? config.color : wheelColor;
 
   return (
     <div
@@ -116,16 +116,17 @@ export default function PenPanel({
         </div>
       </Row>
 
-      {/* 粗细 */}
+      {/* 粗细:文案与板擦一致,用 细/中/粗/特粗 而不是「1/2/3/4 档」 */}
       <Row label="粗细" scale={s}>
         <div style={{ display: 'flex', alignItems: 'center', gap: px(12) }}>
           {WIDTH_LEVELS.map((_, i) => {
             const selected = config.strokeWidth === i;
+            const label = PEN_WIDTH_LABELS[i] ?? '中';
             return (
               <button
                 key={i}
                 onClick={() => onChange({ ...config, strokeWidth: i })}
-                title={`粗细 ${i + 1} 档`}
+                title={`笔迹粗细：${label}`}
                 style={{
                   width: px(64),
                   height: px(48),
@@ -161,7 +162,7 @@ export default function PenPanel({
       </Row>
 
       {/* 颜色 */}
-      <Row label="颜色" scale={s} last align="flex-start">
+      <Row label="颜色" scale={s} last>
         <div style={{ display: 'flex', flexDirection: 'column', gap: px(12) }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: px(12) }}>
             {COLORS_ROW1.map((c) => (
@@ -185,9 +186,9 @@ export default function PenPanel({
               />
             ))}
 
-            {/* 颜色盘入口:彩虹色块 = 打开自定义取色;选中自定义色后显示当前色 */}
+            {/* 颜色盘入口:彩虹色块 = 打开右侧颜色盘浮层;选中自定义色后显示当前色 */}
             <button
-              onClick={() => setPickerOpen((v) => !v)}
+              onClick={onTogglePicker}
               aria-pressed={pickerOpen}
               title={pickerOpen ? '收起颜色盘' : '颜色盘(自定义颜色)'}
               style={{
@@ -203,7 +204,7 @@ export default function PenPanel({
                     ? `${px(2)}px solid #60a5fa`
                     : '1px solid #3a3a40',
                 background: isCustomColor
-                  ? customColor
+                  ? config.color
                   : 'conic-gradient(#ef4444, #f59e0b, #84cc16, #06b6d4, #3b82f6, #a855f7, #ef4444)',
                 boxShadow:
                   pickerOpen || isCustomColor
@@ -242,21 +243,8 @@ export default function PenPanel({
             </button>
           </div>
 
-          {/* 颜色盘:圆盘(色相/饱和度)+ 竖条(明度),拖动实时改画笔颜色 */}
-          {pickerOpen && (
-            <div style={{ paddingTop: px(12), borderTop: '1px dashed #3a3a40' }}>
-              <div style={{ fontSize: px(11), color: '#9ca3af', marginBottom: px(8) }}>
-                颜色盘 · 圆盘选色相/饱和度，右侧竖条调明暗
-              </div>
-              <ColorWheel
-                color={isCustomColor ? config.color : wheelColor}
-                onChange={(hex) => {
-                  setWheelColor(hex);
-                  onChange({ ...config, color: hex });
-                }}
-              />
-            </div>
-          )}
+          {/* 颜色盘不在本面板内展开:它由 BottomToolbar 渲染为**右侧独立浮层**,
+              不占本面板高度,取色时菜单不会上下长高、不会被顶得抖动。 */}
         </div>
       </Row>
     </div>
@@ -268,14 +256,11 @@ function Row({
   children,
   scale,
   last,
-  align = 'center',
 }: {
   label: string;
   children: React.ReactNode;
   scale: number;
   last?: boolean;
-  /** 行内对齐:颜色行展开颜色盘后内容变高,标签要保持顶部对齐 */
-  align?: 'center' | 'flex-start';
 }) {
   const px = (n: number) => scaled(n, scale);
   return (
@@ -284,21 +269,10 @@ function Row({
         display: 'flex',
         padding: `${px(14)}px ${px(16)}px`,
         borderBottom: last ? 'none' : '1px solid #2a2a30',
-        alignItems: align,
+        alignItems: 'center',
       }}
     >
-      <div
-        style={{
-          width: px(52),
-          flexShrink: 0,
-          fontSize: px(13),
-          color: '#9ca3af',
-          // 顶部对齐时与色块中心大致齐平(避免标签顶到行首)
-          paddingTop: align === 'flex-start' ? px(11) : 0,
-        }}
-      >
-        {label}
-      </div>
+      <div style={{ width: px(52), flexShrink: 0, fontSize: px(13), color: '#9ca3af' }}>{label}</div>
       <div style={{ flex: 1 }}>{children}</div>
     </div>
   );

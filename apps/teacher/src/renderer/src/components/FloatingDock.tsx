@@ -29,6 +29,7 @@ import { overlayIn } from '../lib/overlayAnim';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 import PenPanel, { type PenConfig } from './PenPanel';
 import EraserPanel from './EraserPanel';
+import ColorWheel from './ColorWheel';
 
 // C30 风格的桌面悬浮黑色组件:竖排导航(可左右贴边) + 右上角状态 + 底部工具条。
 // 竖条左右两侧各有一个折叠箭头(对应同一个组件),老师站在教室任一侧都能点开。
@@ -951,6 +952,9 @@ export function BottomToolbar({
   const wrapRef = useRef<HTMLDivElement>(null);
   // 菜单是 fixed 浮层(不撑开工具条布局),位置随工具条矩形实时计算
   const [menuPos, setMenuPos] = useState<{ left: number; bottom: number } | null>(null);
+  // 颜色盘浮层:独立于画笔面板,贴在它右侧(右侧放不下就放左侧),位置同样实时计算
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerPos, setPickerPos] = useState<{ left: number; bottom: number } | null>(null);
 
   const isDrawingTool = activeTool === 'pen' || activeTool === 'eraser';
 
@@ -972,15 +976,26 @@ export function BottomToolbar({
     if (openMenu && openMenu !== activeTool) setOpenMenu(null);
   }, [activeTool, openMenu]);
 
-  // 收起工具条时同时收起菜单
+  // 收起工具条时同时收起菜单与颜色盘
   useEffect(() => {
-    if (collapsed) setOpenMenu(null);
+    if (collapsed) {
+      setOpenMenu(null);
+      setPickerOpen(false);
+    }
   }, [collapsed]);
 
-  // 计算菜单位置:水平居中对齐工具条并夹在屏幕内;垂直贴在工具条(含操作条)上方
+  // 颜色盘只属于画笔面板:菜单关掉或切到板擦时一起关
+  useEffect(() => {
+    if (openMenu !== 'pen') setPickerOpen(false);
+  }, [openMenu]);
+
+  // 计算菜单位置:水平居中对齐工具条并夹在屏幕内;垂直贴在工具条(含操作条)上方。
+  // 颜色盘是**独立浮层**,贴在画笔面板右侧(右边放不下就挪到左侧),与面板底边对齐;
+  // 这样取色时画笔面板高度不变,不会出现上下抖动。
   useLayoutEffect(() => {
     if (!openMenu || collapsed) {
       setMenuPos(null);
+      setPickerPos(null);
       return;
     }
     const update = () => {
@@ -992,11 +1007,18 @@ export function BottomToolbar({
       const left = Math.min(maxLeft, Math.max(8, rect.left + rect.width / 2 - menuWidth / 2));
       const bottom = Math.max(8, window.innerHeight - rect.top + scaled(10, s));
       setMenuPos({ left, bottom });
+
+      const pickerWidth = scaled(292, s);
+      const gap = scaled(12, s);
+      let pickerLeft = left + menuWidth + gap;
+      if (pickerLeft + pickerWidth > window.innerWidth - 8) pickerLeft = left - pickerWidth - gap;
+      pickerLeft = Math.max(8, Math.min(pickerLeft, window.innerWidth - pickerWidth - 8));
+      setPickerPos({ left: pickerLeft, bottom });
     };
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
-  }, [openMenu, collapsed, s, x]);
+  }, [openMenu, collapsed, s, x, pickerOpen]);
 
   // 点击工具:先切功能,再(同一按钮)开菜单
   const handleToolClick = (tool: ToolItem) => {
@@ -1270,10 +1292,92 @@ export function BottomToolbar({
           }}
         >
           {openMenu === 'pen' ? (
-            <PenPanel config={penConfig} onChange={onPenConfigChange} />
+            <PenPanel
+              config={penConfig}
+              onChange={onPenConfigChange}
+              pickerOpen={pickerOpen}
+              onTogglePicker={() => setPickerOpen((v) => !v)}
+            />
           ) : (
             <EraserPanel radius={eraserRadius} onChange={onEraserRadiusChange} />
           )}
+        </div>
+      )}
+
+      {/* 颜色盘浮层:贴在画笔面板右侧的独立面板(不占画笔面板高度,取色时不会上下抖)。
+          右侧空间不足时自动挪到左侧;关闭方式:再点一次彩虹色块 / 关掉画笔菜单。 */}
+      {openMenu === 'pen' && pickerOpen && pickerPos && (
+        <div
+          key="color-picker"
+          data-interactive
+          data-overlay-anim
+          style={{
+            position: 'fixed',
+            left: pickerPos.left,
+            bottom: pickerPos.bottom,
+            zIndex: 73,
+            pointerEvents: 'auto',
+            maxHeight: `calc(100vh - ${pickerPos.bottom + 12}px)`,
+            overflowY: 'auto',
+            // 从右侧滑入(颜色盘在画笔面板右边),和浮层入场动画保持一致
+            ...overlayIn('right', 160),
+          }}
+        >
+          <div
+            style={{
+              width: px(292),
+              maxWidth: 'calc(100vw - 24px)',
+              background: '#1b1b1f',
+              borderRadius: px(16),
+              border: '1px solid #333339',
+              boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
+              padding: px(14),
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: px(6),
+              }}
+            >
+              <span style={{ fontSize: px(14), fontWeight: 600, color: '#e5e7eb' }}>颜色盘</span>
+              <button
+                onClick={() => setPickerOpen(false)}
+                title="关闭颜色盘"
+                style={{
+                  width: px(28),
+                  height: px(28),
+                  borderRadius: px(8),
+                  border: 'none',
+                  background: 'transparent',
+                  color: '#9ca3af',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  outline: 'none',
+                  padding: 0,
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.color = '#ffffff';
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af';
+                }}
+              >
+                <X size={px(16)} />
+              </button>
+            </div>
+            <div style={{ fontSize: px(11), color: '#9ca3af', marginBottom: px(10) }}>
+              圆盘选色相/饱和度，右侧竖条调明暗
+            </div>
+            <ColorWheel
+              color={penConfig.color}
+              onChange={(hex) => onPenConfigChange({ ...penConfig, color: hex })}
+            />
+          </div>
         </div>
       )}
     </>

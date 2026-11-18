@@ -1,10 +1,11 @@
+import { useEffect } from 'react';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 import { ERASER_ASPECT } from '../lib/eraser';
 
 // 板擦设置(底部工具条「板擦」再点一次打开的高级菜单)
 // -----------------------------------------------------------------------------
 // 与画笔面板同款黑色浮层,只保留一件事:**板擦大小**(4 档,预览是矩形板擦,
-// 和真实擦除区域同比例,所见即所擦)+ 一行操作提示。
+// 和真实擦除区域同比例,所见即所擦)。
 //
 // 擦除语义已收敛为**自由擦除**(涂到哪擦到哪,只擦掉相交部分):
 // 原来的「清笔迹 / 区域擦除」两个选项被移除,不再让老师在两类语义之间做选择。
@@ -14,7 +15,24 @@ import { ERASER_ASPECT } from '../lib/eraser';
 /** 板擦半径档位(逻辑像素;实际擦除区域按此换算,见 lib/eraser.ts)。
  *  整体比旧版(16/24/36/52)大一号:最小档也要够擦,老师站着也能看到板擦。 */
 export const ERASER_RADIUS_LEVELS = [28, 40, 56, 72] as const;
-export const DEFAULT_ERASER_RADIUS = 40;
+/** 默认「中」:进板擦就有一个明确选中态,不用先选大小才能擦 */
+export const DEFAULT_ERASER_RADIUS: number = ERASER_RADIUS_LEVELS[1];
+/** 档位文案:不用「1/2/3/4 档」这种工程说法,直接用小/中/大/特大,一眼就知道大小 */
+const ERASER_SIZE_LABELS = ['小', '中', '大', '特大'] as const;
+
+/** 找到与给定半径最接近的档位下标(半径被外部改成非档位值时兜底,保证永远有选中项) */
+function nearestLevelIndex(radius: number): number {
+  let best = 0;
+  let bestDiff = Infinity;
+  ERASER_RADIUS_LEVELS.forEach((r, i) => {
+    const diff = Math.abs(r - radius);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = i;
+    }
+  });
+  return best;
+}
 
 export default function EraserPanel({
   radius,
@@ -25,6 +43,16 @@ export default function EraserPanel({
 }) {
   const s = useOverlayScale();
   const px = (n: number) => scaled(n, s);
+
+  // 选中态按「最接近的档位」判定:即使外部传进来一个历史遗留的半径(例如热更新后
+  // 状态还是旧值),面板上也一定有一个高亮的档位,不会出现「四个都没选中」。
+  const activeIndex = nearestLevelIndex(radius);
+
+  // 半径如果不是档位值,静默归一到该档,保证「看到的大小 = 实际擦除大小」
+  useEffect(() => {
+    if (ERASER_RADIUS_LEVELS.includes(radius as (typeof ERASER_RADIUS_LEVELS)[number])) return;
+    onChange(ERASER_RADIUS_LEVELS[activeIndex]);
+  }, [radius, activeIndex, onChange]);
 
   return (
     <div
@@ -64,7 +92,8 @@ export default function EraserPanel({
         <span style={{ fontSize: px(13), color: '#9ca3af' }}>板擦大小</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: px(12) }}>
           {ERASER_RADIUS_LEVELS.map((r, i) => {
-            const selected = radius === r;
+            const selected = i === activeIndex;
+            const label = ERASER_SIZE_LABELS[i] ?? '大';
             // 预览按真实板擦比例缩放(等比缩到按钮里):宽度 ≈ 0.55 × 半径,
             // 高度 = 宽度 × 板擦高宽比;四档大小差异一眼可辨,选中时蓝底仍露得出来
             const w = Math.round(r * 0.55 * s);
@@ -73,7 +102,7 @@ export default function EraserPanel({
               <button
                 key={r}
                 onClick={() => onChange(r)}
-                title={`板擦 ${i + 1} 档`}
+                title={`板擦大小：${label}`}
                 style={{
                   flex: 1,
                   height: px(76),
@@ -106,14 +135,11 @@ export default function EraserPanel({
                     display: 'block',
                   }}
                 />
-                <span style={{ fontSize: px(12), fontWeight: selected ? 600 : 400 }}>{i + 1} 档</span>
+                <span style={{ fontSize: px(12), fontWeight: selected ? 600 : 400 }}>{label}</span>
               </button>
             );
           })}
         </div>
-        <span style={{ fontSize: px(12), color: '#9ca3af', lineHeight: 1.45 }}>
-          按住鼠标左键拖动即可连续擦除；板擦只在按下时出现，涂到哪擦到哪。
-        </span>
       </div>
     </div>
   );
