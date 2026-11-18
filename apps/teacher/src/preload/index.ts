@@ -31,6 +31,14 @@ const api = {
   pointer: {
     // 切换鼠标穿透:interactive=true 捕获鼠标(悬浮组件可交互),false 穿透桌面
     setInteractive: (interactive: boolean) => ipcRenderer.invoke('pointer:set-interactive', interactive),
+    // 订阅主进程推送的鼠标位置(窗口内容 CSS 像素)。
+    // 兜底 forward 转发失效(窗口 hide→show / GPU 重建后可能不再转发 mousemove),
+    // 渲染层据此用 elementFromPoint 判定悬停;返回取消订阅函数。
+    onSyncCursor: (cb: (p: { x: number; y: number }) => void) => {
+      const listener = (_e: unknown, p: { x: number; y: number }) => cb(p);
+      ipcRenderer.on('pointer:sync-cursor', listener);
+      return () => ipcRenderer.removeListener('pointer:sync-cursor', listener);
+    },
   },
   batch: {
     // 开启/关闭「桌面批注」全局鼠标钩子转发(切到画笔/板擦等工具时开启)
@@ -58,12 +66,13 @@ const api = {
   },
   spotlight: {
     // 截取屏幕指定区域(逻辑坐标)→ 返回 PNG dataURL
-    // opts.hideWindow=false 时保持窗口显示(放大镜用,避免窗口闪烁)
-    capture: (rect: { x: number; y: number; w: number; h: number }, opts?: { hideWindow?: boolean }) =>
-      ipcRenderer.invoke('spotlight:capture', rect, opts),
-    // 保存聚焦内容到文件(弹出保存对话框)
-    save: (rect: { x: number; y: number; w: number; h: number }) =>
-      ipcRenderer.invoke('spotlight:save', rect),
+    // 调用前渲染层需先卸载聚焦层/隐藏装饰(主进程不会再隐藏或移动窗口)
+    capture: (rect: { x: number; y: number; w: number; h: number }) =>
+      ipcRenderer.invoke('spotlight:capture', rect),
+    // 快速保存聚焦内容:直接存到「图片/C30聚焦」,不弹原生对话框
+    // (原生模态对话框会导致浮层鼠标按下事件失效,见主进程注释)
+    saveQuick: (rect: { x: number; y: number; w: number; h: number }) =>
+      ipcRenderer.invoke('spotlight:save-quick', rect),
   },
   windows: {
     // 枚举系统当前打开的窗口(标题 + 缩略图 + 窗口句柄)

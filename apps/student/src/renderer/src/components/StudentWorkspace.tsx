@@ -4,6 +4,7 @@ import { io, type Socket } from 'socket.io-client';
 import FloatingDock, { TopStatusBar } from './FloatingDock';
 import Whiteboard from './Whiteboard';
 import usePointerPassthrough from '../hooks/usePointerPassthrough';
+import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
 // 房间信息(来自 mDNS 发现)
 interface RoomInfo {
@@ -15,6 +16,9 @@ interface RoomInfo {
 
 // 接收端(学生端)极简模式:无登录,启动即搜索局域网课堂 → 选择进入 → 跟随接收发送端画面。
 export default function StudentWorkspace() {
+  // 浮层缩放:选择课堂面板等按屏幕尺寸等比放大
+  const uiScale = useOverlayScale();
+  const spx = (n: number) => scaled(n, uiScale);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [joined, setJoined] = useState(false);
@@ -155,33 +159,34 @@ export default function StudentWorkspace() {
           left: '50%',
           transform: 'translate(-50%,-50%)',
           pointerEvents: 'auto',
-          width: 420,
+          width: spx(480),
+          maxWidth: 'calc(100vw - 32px)',
           background: '#ffffff',
-          borderRadius: 16,
+          borderRadius: spx(16),
           boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
-          padding: '28px 28px',
+          padding: `${spx(28)}px ${spx(28)}px`,
           color: '#1f2937',
         }}
       >
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>选择课堂</div>
-        <div style={{ fontSize: 13, color: '#9aa1ac', marginBottom: 20 }}>
+        <div style={{ fontSize: spx(20), fontWeight: 700, marginBottom: spx(4) }}>选择课堂</div>
+        <div style={{ fontSize: spx(14), color: '#9aa1ac', marginBottom: spx(20) }}>
           已发现局域网内的课堂,点击进入即可跟随画面
         </div>
 
         {status === 'connecting' ? (
-          <div style={{ padding: '32px 0', textAlign: 'center', color: '#6b7280' }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937', marginBottom: 8 }}>正在接入课堂…</div>
-            <div style={{ fontSize: 13, color: '#9aa1ac' }}>{selectedRoom?.teacherName || ''}</div>
+          <div style={{ padding: `${spx(32)}px 0`, textAlign: 'center', color: '#6b7280' }}>
+            <div style={{ fontSize: spx(16), fontWeight: 600, color: '#1f2937', marginBottom: spx(8) }}>正在接入课堂…</div>
+            <div style={{ fontSize: spx(14), color: '#9aa1ac' }}>{selectedRoom?.teacherName || ''}</div>
           </div>
         ) : rooms.length === 0 ? (
-          <div style={{ padding: '32px 0', textAlign: 'center', color: '#9aa1ac' }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#1f2937', marginBottom: 8 }}>正在搜索课堂…</div>
-            <div style={{ fontSize: 13 }}>
+          <div style={{ padding: `${spx(32)}px 0`, textAlign: 'center', color: '#9aa1ac' }}>
+            <div style={{ fontSize: spx(16), fontWeight: 600, color: '#1f2937', marginBottom: spx(8) }}>正在搜索课堂…</div>
+            <div style={{ fontSize: spx(14) }}>
               {error || '请确认发送端已开启,并与本机处于同一局域网'}
             </div>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: spx(10) }}>
             {rooms.map((room) => (
               <button
                 key={room.roomCode}
@@ -189,10 +194,10 @@ export default function StudentWorkspace() {
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 12,
-                  padding: '14px 16px',
+                  gap: spx(12),
+                  padding: `${spx(14)}px ${spx(16)}px`,
                   border: '1px solid #e5e7eb',
-                  borderRadius: 12,
+                  borderRadius: spx(12),
                   background: '#fff',
                   cursor: 'pointer',
                   textAlign: 'left',
@@ -210,15 +215,15 @@ export default function StudentWorkspace() {
               >
                 <div
                   style={{
-                    width: 40,
-                    height: 40,
+                    width: spx(44),
+                    height: spx(44),
                     borderRadius: '50%',
                     background: '#2563eb',
                     color: '#fff',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    fontSize: 16,
+                    fontSize: spx(17),
                     fontWeight: 700,
                     flexShrink: 0,
                   }}
@@ -226,10 +231,10 @@ export default function StudentWorkspace() {
                   {room.teacherName.charAt(0) || '课'}
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 15, fontWeight: 600 }}>{room.teacherName}的课堂</div>
-                  <div style={{ fontSize: 12, color: '#9aa1ac', marginTop: 2 }}>房间号 {room.roomCode}</div>
+                  <div style={{ fontSize: spx(16), fontWeight: 600 }}>{room.teacherName}的课堂</div>
+                  <div style={{ fontSize: spx(13), color: '#9aa1ac', marginTop: spx(2) }}>房间号 {room.roomCode}</div>
                 </div>
-                <div style={{ fontSize: 12, color: '#2563eb', fontWeight: 600 }}>进入</div>
+                <div style={{ fontSize: spx(13), color: '#2563eb', fontWeight: 600 }}>进入</div>
               </button>
             ))}
           </div>
@@ -244,13 +249,13 @@ export default function StudentWorkspace() {
             }}
             style={{
               width: '100%',
-              padding: '10px',
-              marginTop: 16,
+              padding: spx(11),
+              marginTop: spx(16),
               border: 'none',
-              borderRadius: 8,
+              borderRadius: spx(8),
               background: '#eef2ff',
               color: '#2563eb',
-              fontSize: 14,
+              fontSize: spx(15),
               cursor: 'pointer',
             }}
           >

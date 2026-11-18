@@ -12,15 +12,24 @@ import type {
   ImageItem,
   WhiteboardTheme,
   PenType,
+  EraserMode,
 } from '@c30/shared';
 import { PEN_DEFAULT_OPACITY } from '@c30/shared';
 import { CanvasRenderer } from './Renderer';
+import {
+  eraserRectAt,
+  eraserSweepRects,
+  strokeIntersectsRect,
+  clipStrokeByRects,
+  type EraserRect,
+} from '../lib/eraser';
 import type { ToolConfig } from './WhiteboardToolbar';
 import type { PenConfig } from './PenPanel';
 import MemberOverlay from './MemberOverlay';
 import JoinToast from './JoinToast';
 import DanmakuLayer from './DanmakuLayer';
 import DanmakuInput from './DanmakuInput';
+import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
 const COLORS = [
   '#1f2937', '#e5484d', '#2563eb', '#16a34a',
@@ -36,6 +45,10 @@ interface Props {
   activeTool?: string;
   // 画笔设置(来自 PenPanel,白板内画笔复用,与桌面批注一致)
   penConfig?: PenConfig;
+  // 板擦半径(来自底部工具条「板擦」菜单,与桌面批注一致)
+  eraserRadius?: number;
+  // 板擦擦除方式:清笔迹(整条清除)/ 区域擦除(只擦相交部分)
+  eraserMode?: EraserMode;
 }
 
 // 白板背景主题定义:背景色 + 可选网格/格线纹理
@@ -96,44 +109,62 @@ function backgroundFor(theme: WhiteboardTheme): CSSProperties {
   }
 }
 
-// 左下角操作栏按钮通用样式
-const bottomBtnStyle: CSSProperties = {
-  width: 52,
-  height: 52,
-  borderRadius: 12,
+// 左下角操作栏按钮通用样式(尺寸随浮层缩放)
+const bottomBtnStyle = (scale: number): CSSProperties => ({
+  width: scaled(54, scale),
+  height: scaled(54, scale),
+  borderRadius: scaled(12, scale),
   border: 'none',
   cursor: 'pointer',
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
   justifyContent: 'center',
-  gap: 4,
+  gap: scaled(4, scale),
   background: 'rgba(17,24,39,0.72)',
   color: '#ffffff',
   boxShadow: '0 4px 14px rgba(0,0,0,0.2)',
   backdropFilter: 'blur(6px)',
   outline: 'none',
   padding: 0,
-};
+});
 
 // 一次绘制操作(用于本地 undo)
 interface DrawOp {
-  kind: 'append' | 'remove' | 'clear';
+  kind: 'append' | 'remove' | 'clear' | 'erase';
   strokes?: Stroke[];
   removedStrokes?: Stroke[];
   clearedStrokes?: Stroke[];
+  // 「erase」:一次擦除手势前后,被替换掉的原始笔画 / 擦除后剩下的片段。
+  // 区域擦除会把一条笔画切成多段,必须成对记录才能正确撤销/重做。
+  eraseBefore?: Stroke[];
+  eraseAfter?: Stroke[];
 }
 
 export interface WhiteboardHandle {
   undo: () => void;
   redo: () => void;
   clear: () => void;
+  // 本地插入一张图片(底图)。教师端是插入动作的发起方,不能依赖自己的 socket 广播
+  // (服务端只把 whiteboard.event 转发给其他客户端),所以由调用方本地追加后再广播。
+  appendImage: (img: ImageItem) => void;
 }
 
 const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
-  { socket, roomCode, isTeacher, onExit, activeTool = 'pen', penConfig },
+  {
+    socket,
+    roomCode,
+    isTeacher,
+    onExit,
+    activeTool = 'pen',
+    penConfig,
+    eraserRadius = 24,
+    eraserMode = 'stroke',
+  },
   ref,
 ) {
+  const uiScale = useOverlayScale();
+  const spx = (n: number) => scaled(n, uiScale);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // 渲染器:CanvasRenderer 实现,未来可换 NativeRenderer(C++)
   const rendererRef = useRef<CanvasRenderer | null>(null);
@@ -175,7 +206,31 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       setRubberBand(null);
       transformRef.current = null;
     }
+    // 切离板擦时收起矩形板擦(避免换了工具还残留一块白块)
+    if (mapped !== 'eraser') {
+      erasingRef.current = false;
+      lastErasePointRef.current = null;
+      setEraserRect(null);
+    }
   }, [activeTool]);
+
+  // 板擦粗细由底部「板擦」菜单控制,同步进白板内部工具配置
+  useEffect(() => {
+    setTool((prev) => (prev.eraserRadius === eraserRadius ? prev : { ...prev, eraserRadius }));
+  }, [eraserRadius]);
+
+  // 板擦擦除方式(清笔迹 / 区域擦除)由「板擦」高级菜单控制
+  const eraserModeRef = useRef<EraserMode>(eraserMode);
+  eraserModeRef.current = eraserMode;
+
+  // ---- 板擦:按住才出现的矩形板擦 + 拖动自由擦除 ----
+  // eraserRect 只在「鼠标按下 → 抬起」期间有值,所以板擦样式不会跟着鼠标乱飘
+  const [eraserRect, setEraserRect] = useState<EraserRect | null>(null);
+  const erasingRef = useRef(false);
+  const lastErasePointRef = useRef<{ x: number; y: number } | null>(null);
+  // 一次擦除手势(按下 → 抬起)累积成一步 undo:
+  //   before = 手势中被替换/删除的「原有」笔画;createdIds = 手势期间本地产出的片段 id
+  const eraseGestureRef = useRef<{ before: Stroke[]; createdIds: Set<string> } | null>(null);
 
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -271,16 +326,59 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     emit({ type: 'stroke.append', payload: s });
   };
 
-  const removeStrokes = (ids: string[]) => {
-    const removed = strokesRef.current.filter((s) => ids.includes(s.id));
-    if (removed.length === 0) return;
-    strokesRef.current = strokesRef.current.filter((s) => !ids.includes(s.id));
-    undoStackRef.current.push({ kind: 'remove', removedStrokes: removed });
+  // ---- 板擦:矩形板擦 + 拖动自由擦除 ----
+  //
+  // 擦除语义(对应 docs/whiteboard-design.md「擦除语义」):
+  //   · 清笔迹(stroke):板擦矩形碰到哪条笔迹,那条笔迹整条删除;
+  //   · 区域擦除(area):板擦像画笔一样涂抹,只把与板擦相交的部分裁掉,
+  //     剩下的部分切成若干普通笔迹片段(remove 旧的 + append 新的同步给学生端)。
+  // 两种模式都是「按下 → 拖动」连续生效;轨迹按细步长细分(见 lib/eraser.ts),
+  // 所以手感是连续自由擦除,不会一节一节跳。一次手势(按下→抬起)合成一步 undo。
+  const applyEraseRects = (rects: EraserRect[]) => {
+    if (rects.length === 0) return;
+    const areaMode = eraserModeRef.current === 'area';
+    const gesture = eraseGestureRef.current;
+
+    const kept: Stroke[] = [];
+    const removedIds: string[] = [];
+    const added: Stroke[] = [];
+    let changed = false;
+
+    for (const s of strokesRef.current) {
+      if (!rects.some((r) => strokeIntersectsRect(s, r))) {
+        kept.push(s);
+        continue;
+      }
+      changed = true;
+      removedIds.push(s.id);
+      // 手势期间自己切出来的片段不算「擦前笔迹」,否则 undo 会把片段当成原件还原
+      if (gesture && !gesture.createdIds.has(s.id)) gesture.before.push(s);
+      if (!areaMode) continue; // 清笔迹:整条删除,不留片段
+
+      const pieces = clipStrokeByRects(s, rects);
+      added.push(...pieces);
+      if (gesture) {
+        for (const p of pieces) gesture.createdIds.add(p.id);
+      }
+    }
+
+    if (!changed) return;
+    strokesRef.current = [...kept, ...added];
+    redrawAll();
+    emit({ type: 'stroke.remove', payload: { strokeIds: removedIds } });
+    for (const a of added) emit({ type: 'stroke.append', payload: a });
+  };
+
+  // 手势结束:把整次擦除合成一步 undo(而不是鼠标每移动一次一步)
+  const endEraseGesture = () => {
+    const g = eraseGestureRef.current;
+    eraseGestureRef.current = null;
+    if (!g || g.before.length === 0) return;
+    const after = strokesRef.current.filter((s) => g.createdIds.has(s.id));
+    undoStackRef.current.push({ kind: 'erase', eraseBefore: g.before, eraseAfter: after });
     if (undoStackRef.current.length > 100) undoStackRef.current.shift();
     redoStackRef.current = [];
-    redrawAll();
     syncStackState();
-    emit({ type: 'stroke.remove', payload: { strokeIds: ids } });
   };
 
   const clearAll = () => {
@@ -313,6 +411,12 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     } else if (op.kind === 'clear' && op.clearedStrokes) {
       restoredStrokes = op.clearedStrokes;
       strokesRef.current = [...op.clearedStrokes];
+    } else if (op.kind === 'erase' && op.eraseBefore && op.eraseAfter) {
+      // 擦除:撤掉擦出来的片段,还原被擦前的原始笔迹
+      removedStrokeIds = op.eraseAfter.map((s) => s.id);
+      strokesRef.current = strokesRef.current.filter((s) => !removedStrokeIds.includes(s.id));
+      restoredStrokes = op.eraseBefore;
+      strokesRef.current.push(...op.eraseBefore);
     }
 
     redrawAll();
@@ -337,6 +441,12 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       strokesRef.current = strokesRef.current.filter((s) => !removedStrokeIds.includes(s.id));
     } else if (op.kind === 'clear' && op.clearedStrokes) {
       strokesRef.current = [];
+    } else if (op.kind === 'erase' && op.eraseBefore && op.eraseAfter) {
+      // 重做擦除:撤掉原始笔迹,重新放回擦出来的片段
+      removedStrokeIds = op.eraseBefore.map((s) => s.id);
+      strokesRef.current = strokesRef.current.filter((s) => !removedStrokeIds.includes(s.id));
+      restoredStrokes = op.eraseAfter;
+      strokesRef.current.push(...op.eraseAfter);
     }
 
     redrawAll();
@@ -344,23 +454,20 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     emit({ type: 'undo', payload: { removedStrokeIds, restoredStrokes } });
   };
 
-  // 暴露撤销/重做/清空给外部底部悬浮工具条(白板模式下与桌面批注层统一路由)
-  useImperativeHandle(ref, () => ({ undo, redo, clear: clearAll }), [undo, redo, clearAll]);
+  // 本地插入图片(底图):教师端作为插入发起方自己先应用一份,不依赖 socket 回环
+  const appendImage = useCallback((img: ImageItem) => {
+    if (imagesRef.current.some((x) => x.id === img.id)) return;
+    imagesRef.current = [...imagesRef.current, img];
+    setImages(imagesRef.current);
+  }, []);
 
-  // 橡皮擦命中检测(整笔删除降级)
-  const eraseAt = (x: number, y: number) => {
-    const r = tool.eraserRadius;
-    const hitIds: string[] = [];
-    for (const s of strokesRef.current) {
-      for (const p of s.points) {
-        if (Math.hypot(p.x - x, p.y - y) <= r) {
-          hitIds.push(s.id);
-          break;
-        }
-      }
-    }
-    if (hitIds.length > 0) removeStrokes(hitIds);
-  };
+  // 暴露撤销/重做/清空/插图给外部底部悬浮工具条与聚焦「插入白板」
+  useImperativeHandle(ref, () => ({ undo, redo, clear: clearAll, appendImage }), [
+    undo,
+    redo,
+    clearAll,
+    appendImage,
+  ]);
 
   const getPos = (e: React.PointerEvent) => {
     const canvas = canvasRef.current!;
@@ -385,7 +492,8 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
 
   // 判断手柄命中(8 方向 + 内部移动)
   const hitHandle = (box: { x: number; y: number; w: number; h: number }, px: number, py: number): 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'move' | null => {
-    const H = 10; // 手柄命中半径
+    // 命中半径随浮层缩放一起放大,大屏上抓取手柄更轻松
+    const H = Math.max(10, Math.round(10 * uiScale));
     const cx = box.x + box.w / 2;
     const cy = box.y + box.h / 2;
     const corners = [
@@ -430,7 +538,14 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     const t = tool;
 
     if (t.activeTool === 'eraser') {
-      eraseAt(x, y);
+      // 板擦:按下才出现矩形板擦,并立刻擦掉当前位置(单击也能擦)
+      const radius = t.eraserRadius;
+      erasingRef.current = true;
+      eraseGestureRef.current = { before: [], createdIds: new Set<string>() };
+      lastErasePointRef.current = { x, y };
+      setEraserRect(eraserRectAt(x, y, radius));
+      canvasRef.current?.setPointerCapture(e.pointerId);
+      applyEraseRects([eraserRectAt(x, y, radius)]);
       return;
     }
     if (t.activeTool === 'select') {
@@ -465,7 +580,8 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     const penType: PenType = pc && pc.penType !== 'highlighter' ? pc.penType : pc?.penType === 'highlighter' ? 'brush' : t.penType;
     const WIDTH_LEVELS = [3, 6, 10, 16];
     const color = pc ? pc.color : t.color;
-    const width = pc ? WIDTH_LEVELS[Math.max(0, Math.min(3, pc.strokeWidth - 1))] ?? t.strokeWidth : t.strokeWidth;
+    // strokeWidth 是 0-3 的档位索引(与 PenPanel / 桌面批注层一致),不能减 1
+    const width = pc ? WIDTH_LEVELS[Math.max(0, Math.min(3, pc.strokeWidth))] ?? t.strokeWidth : t.strokeWidth;
     const opacity = pc && pc.penType === 'highlighter' ? 0.35 : PEN_DEFAULT_OPACITY[penType];
     const stroke: Stroke = {
       id: crypto.randomUUID(),
@@ -537,6 +653,20 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       return;
     }
 
+    // 板擦:按住拖动 → 以「上一位置 → 当前位置」的细分轨迹连续擦除(自由擦除的手感)
+    if (erasingRef.current) {
+      const { x, y } = getPos(e);
+      const radius = tool.eraserRadius;
+      const last = lastErasePointRef.current;
+      lastErasePointRef.current = { x, y };
+      setEraserRect(eraserRectAt(x, y, radius));
+      if (last) {
+        const rects = eraserSweepRects(last.x, last.y, x, y, radius);
+        if (rects.length > 0) applyEraseRects(rects);
+      }
+      return;
+    }
+
     const drawing = drawingRef.current;
     if (!drawing) return;
     const { x, y } = getPos(e);
@@ -563,6 +693,15 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   };
 
   const onPointerUp = () => {
+    // 板擦:松开即收起矩形板擦,并把整次擦除合成一步 undo
+    if (erasingRef.current) {
+      erasingRef.current = false;
+      lastErasePointRef.current = null;
+      setEraserRect(null);
+      endEraseGesture();
+      return;
+    }
+
     const tr = transformRef.current;
     // 选择工具结束
     if (tr) {
@@ -621,6 +760,18 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     }
   };
 
+  // 指针被系统取消(触控板手势 / 窗口失焦等):按「抬起」收尾,避免矩形板擦卡在屏幕上
+  const onPointerCancel = () => {
+    if (erasingRef.current) {
+      erasingRef.current = false;
+      lastErasePointRef.current = null;
+      setEraserRect(null);
+      endEraseGesture();
+      return;
+    }
+    onPointerUp();
+  };
+
   // 接收远端事件 + 拉取快照 + 成员/弹幕/互动
   useEffect(() => {
     if (!socket) return;
@@ -628,7 +779,11 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     const onWbState = (snap: { roomCode: string; strokes: Stroke[]; images?: ImageItem[]; theme?: WhiteboardTheme; nextSeq: number }) => {
       console.log('[whiteboard] 收到快照 theme =', JSON.stringify(snap.theme), 'roomCode =', snap.roomCode);
       strokesRef.current = [...snap.strokes];
-      imagesRef.current = snap.images ? [...snap.images] : [];
+      // 按 id 合并:教师端「插入白板」的底图是先本地追加、再广播的,
+      // 若快照先一步返回(此时服务端还没收到 image.append),直接覆盖会把本地底图冲掉。
+      const snapImages = snap.images ? [...snap.images] : [];
+      const localOnly = imagesRef.current.filter((im) => !snapImages.some((x) => x.id === im.id));
+      imagesRef.current = [...snapImages, ...localOnly];
       setImages(imagesRef.current);
       if (snap.theme) setTheme(snap.theme);
       seqRef.current = snap.nextSeq;
@@ -780,16 +935,46 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', ...backgroundFor(theme) }}>
+        {/* 图片底图(聚焦「插入白板」):放在 canvas 之前,
+            与 canvas 同为「定位元素」时按 DOM 顺序绘制 → 图片在下、笔迹在上,
+            画笔/板擦可以正常覆盖到图片上方。 */}
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          {images.map((img) => (
+            <img
+              key={img.id}
+              src={img.src}
+              alt=""
+              draggable={false}
+              style={{
+                position: 'absolute',
+                left: img.x,
+                top: img.y,
+                width: img.w,
+                height: img.h,
+                objectFit: 'contain',
+                pointerEvents: 'none',
+                userSelect: 'none',
+              }}
+            />
+          ))}
+        </div>
+
         <canvas
           ref={canvasRef}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onPointerCancel={onPointerCancel}
           style={{
             display: 'block',
+            // 必须显式定位:未定位的静态 canvas 会被后面的绝对定位图片盖住
+            position: 'relative',
             cursor: isTeacher
               ? tool.activeTool === 'eraser'
-                ? 'crosshair'
+                ? // 擦除中:隐藏系统光标,让「矩形板擦」本身当光标(松开即恢复十字)
+                  eraserRect
+                  ? 'none'
+                  : 'crosshair'
                 : tool.activeTool === 'select'
                   ? 'pointer'
                   : 'crosshair'
@@ -797,6 +982,28 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
             touchAction: 'none',
           }}
         />
+
+        {/* 矩形白板擦:只有「按下鼠标」擦除时才生成,松开立即消失;
+            位置与尺寸直接由擦除判定用的矩形算出,保证「看到的就是擦到的」。 */}
+        {eraserRect && (
+          <div
+            aria-hidden
+            style={{
+              position: 'absolute',
+              left: eraserRect.x,
+              top: eraserRect.y,
+              width: eraserRect.w,
+              height: eraserRect.h,
+              borderRadius: Math.max(3, Math.round(eraserRect.w * 0.1)),
+              background: 'linear-gradient(180deg, #ffffff 0%, #eef1f5 100%)',
+              border: '2px solid #2563eb',
+              // 底部一道深色内阴影,让白块看起来像一块有厚度的板擦
+              boxShadow: '0 4px 14px rgba(0,0,0,0.3), inset 0 -4px 0 rgba(15,23,42,0.08)',
+              opacity: 0.92,
+              pointerEvents: 'none',
+            }}
+          />
+        )}
 
         {/* 框选矩形(选择工具拖拽中) */}
         {rubberBand && (
@@ -816,28 +1023,8 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
 
         {/* 选择变换框(选中后,带 8 手柄) */}
         {selection && (
-          <SelectionBox box={selection} />
+          <SelectionBox box={selection} scale={uiScale} />
         )}
-
-        {/* 图片元素(聚焦「插入白板」):叠加在 canvas 之上 */}
-        {images.map((img) => (
-          <img
-            key={img.id}
-            src={img.src}
-            alt=""
-            draggable={false}
-            style={{
-              position: 'absolute',
-              left: img.x,
-              top: img.y,
-              width: img.w,
-              height: img.h,
-              objectFit: 'contain',
-              pointerEvents: 'none',
-              userSelect: 'none',
-            }}
-          />
-        ))}
 
         <DanmakuLayer danmakuList={danmakuList} />
 
@@ -845,14 +1032,14 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
           <div
             style={{
               position: 'absolute',
-              top: 12,
+              top: spx(12),
               left: '50%',
               transform: 'translateX(-50%)',
               background: 'rgba(31,41,55,0.72)',
               color: '#fff',
-              fontSize: 12,
-              padding: '5px 12px',
-              borderRadius: 14,
+              fontSize: spx(13),
+              padding: `${spx(6)}px ${spx(14)}px`,
+              borderRadius: spx(14),
               pointerEvents: 'none',
             }}
           >
@@ -869,7 +1056,7 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
           isTeacher={isTeacher}
           interaction={interaction}
           onInteractionChange={isTeacher ? updateInteraction : undefined}
-          rightOffset={100}
+          rightOffset={spx(104)}
         />
 
         <JoinToast toasts={toasts} />
@@ -880,29 +1067,29 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
             data-interactive
             style={{
               position: 'absolute',
-              left: 16,
-              bottom: 16,
+              left: spx(16),
+              bottom: spx(16),
               display: 'flex',
-              gap: 8,
+              gap: spx(8),
             }}
           >
             <button
               data-interactive
               onClick={onExit}
               title="关闭"
-              style={bottomBtnStyle}
+              style={bottomBtnStyle(uiScale)}
             >
-              <span style={{ fontSize: 20, lineHeight: 1 }}>⏻</span>
-              <span style={{ fontSize: 11, lineHeight: 1 }}>关闭</span>
+              <span style={{ fontSize: spx(21), lineHeight: 1 }}>⏻</span>
+              <span style={{ fontSize: spx(12), lineHeight: 1 }}>关闭</span>
             </button>
             <button
               data-interactive
               onClick={() => setShowThemePanel((v) => !v)}
               title="主题"
-              style={{ ...bottomBtnStyle, background: showThemePanel ? 'rgba(59,130,246,0.9)' : 'rgba(17,24,39,0.72)' }}
+              style={{ ...bottomBtnStyle(uiScale), background: showThemePanel ? 'rgba(59,130,246,0.9)' : 'rgba(17,24,39,0.72)' }}
             >
-              <span style={{ fontSize: 20, lineHeight: 1 }}>🎨</span>
-              <span style={{ fontSize: 11, lineHeight: 1 }}>主题</span>
+              <span style={{ fontSize: spx(21), lineHeight: 1 }}>🎨</span>
+              <span style={{ fontSize: spx(12), lineHeight: 1 }}>主题</span>
             </button>
           </div>
         )}
@@ -913,20 +1100,21 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
             data-interactive
             style={{
               position: 'absolute',
-              left: 16,
-              bottom: 76,
-              width: 220,
+              left: spx(16),
+              bottom: spx(80),
+              width: spx(260),
+              maxWidth: 'calc(100vw - 32px)',
               background: 'rgba(17,24,39,0.92)',
-              borderRadius: 12,
-              padding: 12,
+              borderRadius: spx(12),
+              padding: spx(12),
               boxShadow: '0 8px 28px rgba(0,0,0,0.3)',
               backdropFilter: 'blur(8px)',
             }}
           >
-            <div style={{ color: '#93c5fd', fontSize: 12, fontWeight: 600, marginBottom: 10 }}>
+            <div style={{ color: '#93c5fd', fontSize: spx(13), fontWeight: 600, marginBottom: spx(10) }}>
               主题 / Theme
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: spx(8) }}>
               {THEMES.map((t) => {
                 const active = theme === t.key;
                 return (
@@ -934,15 +1122,18 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
                     key={t.key}
                     data-interactive
                     onClick={() => changeTheme(t.key)}
+                    title={t.label}
                     style={{
                       display: 'flex',
                       flexDirection: 'column',
                       alignItems: 'center',
-                      gap: 4,
-                      padding: '6px 4px',
-                      borderRadius: 8,
-                      border: active ? '2px solid #3b82f6' : '1px solid transparent',
-                      background: active ? 'rgba(59,130,246,0.18)' : 'rgba(255,255,255,0.06)',
+                      gap: spx(4),
+                      padding: `${spx(7)}px ${spx(4)}px`,
+                      borderRadius: spx(8),
+                      // 选中态:蓝底 + 蓝色描边,和底部工具条保持同一套选中视觉
+                      border: active ? `${spx(2)}px solid #60a5fa` : '1px solid transparent',
+                      background: active ? 'rgba(37,99,235,0.9)' : 'rgba(255,255,255,0.06)',
+                      boxShadow: active ? '0 0 0 2px rgba(37,99,235,0.35)' : 'none',
                       cursor: 'pointer',
                       outline: 'none',
                     }}
@@ -950,15 +1141,15 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
                     <span
                       style={{
                         width: '100%',
-                        height: 30,
-                        borderRadius: 5,
+                        height: spx(34),
+                        borderRadius: spx(5),
                         display: 'block',
                         ...backgroundFor(t.key),
                         backgroundSize: t.key === 'dot' ? '8px 8px' : t.key === 'pinyin' ? '30px 20px' : t.key === 'grid' ? '20px 20px' : undefined,
                         border: t.key === 'white' ? '1px solid #e5e7eb' : 'none',
                       }}
                     />
-                    <span style={{ color: active ? '#fff' : '#9ca3af', fontSize: 10, lineHeight: 1 }}>
+                    <span style={{ color: active ? '#ffffff' : '#9ca3af', fontSize: spx(11), lineHeight: 1, fontWeight: active ? 600 : 400 }}>
                       {t.label}
                     </span>
                   </button>
@@ -981,8 +1172,8 @@ export default Whiteboard;
 export { COLORS };
 
 // 选择变换框:蓝色边框 + 8 个手柄(四角 + 四边中点)
-function SelectionBox({ box }: { box: { x: number; y: number; w: number; h: number } }) {
-  const H = 9; // 手柄尺寸
+function SelectionBox({ box, scale }: { box: { x: number; y: number; w: number; h: number }; scale: number }) {
+  const H = Math.max(9, Math.round(9 * scale)); // 手柄尺寸(随浮层缩放)
   const handles: { key: string; left: number; top: number; cursor: string }[] = [
     { key: 'nw', left: box.x - H / 2, top: box.y - H / 2, cursor: 'nwse-resize' },
     { key: 'n', left: box.x + box.w / 2 - H / 2, top: box.y - H / 2, cursor: 'ns-resize' },

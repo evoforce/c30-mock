@@ -1,6 +1,6 @@
-import { app, shell, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, desktopCapturer, dialog } from 'electron';
+import { app, shell, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, desktopCapturer } from 'electron';
 import { join } from 'path';
-import { writeFile, readFile } from 'fs/promises';
+import { writeFile, readFile, appendFile, mkdir } from 'fs/promises';
 import { execFile } from 'child_process';
 import { networkInterfaces } from 'os';
 import { mdsd } from '@c30/mdsd';
@@ -84,6 +84,14 @@ let pointerInteractive = false;
 let consumeOn = false;
 // 是否真正退出(托盘菜单点击"退出"时置 true,避免 close 拦截)
 let isQuitting = false;
+
+// 穿透/点击问题诊断日志(写到 userData/pointer-diag.log)。
+// 只在「状态切换」这类低频时机写一行,正常使用几乎为空;POINTER_DIAG=0 可关闭。
+function diag(msg: string): void {
+  if (process.env.POINTER_DIAG === '0') return;
+  const line = `${new Date().toISOString()} ${msg}\n`;
+  appendFile(join(app.getPath('userData'), 'pointer-diag.log'), line).catch(() => {});
+}
 
 // 获取本机局域网 IPv4 地址
 function getLanIP(): string {
@@ -169,6 +177,15 @@ function createWindow(): void {
     mainWindow?.setFocusable(false);
   });
 
+  // 窗口重新显示(托盘显示等)时,重挂一次穿透与 forward 转发,并推一次鼠标位置;
+  // 顺带把「吞 mousedown」复位(非批注态),避免浮层出现「看得见却点不动」。
+  mainWindow.on('show', () => {
+    if (!annotationActive) {
+      applyConsume(false);
+    }
+    reapplyPassthrough();
+  });
+
   // 临时:转发 renderer 的 console 到终端,便于排查白屏
   mainWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     const levels = ['LOG', 'WARN', 'ERROR', 'INFO', 'DEBUG', 'VERBOSE'];
@@ -188,6 +205,9 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
   }
+
+  // 启动「鼠标位置兜底同步」:forward 转发失效时仍能正确判定悬停,避免浮层点不动
+  startCursorSyncFallback();
 }
 
 // 设置「吞掉 mousedown」状态(带缓存,幂等)。当 on=true 时,C 层只吞
@@ -201,6 +221,7 @@ function applyConsume(on: boolean): void {
   }
   if (on === consumeOn) return;
   consumeOn = on;
+  diag(`consume=${on} (annotation=${annotationActive})`);
   try {
     uIOhook.setMouseConsume(on);
   } catch (err) {
@@ -215,6 +236,7 @@ function registerPointerControl(): void {
   // interactive=true 时捕获鼠标(悬浮组件可交互),false 时穿透到桌面
   ipcMain.handle('pointer:set-interactive', (_e, interactive: boolean) => {
     pointerInteractive = interactive;
+    diag(`set-interactive=${interactive} (annotation=${annotationActive})`);
     // hover 变化立即同步 consume:批注模式下,悬停悬浮栏(interactive=true)
     // 时不吞(悬浮栏可点),移到空白区(interactive=false)时吞(准备书写)。
     if (annotationActive) {
@@ -224,6 +246,61 @@ function registerPointerControl(): void {
     mainWindow.setIgnoreMouseEvents(!interactive, { forward: true });
     return { ok: true };
   });
+}
+
+// ---------------------------------------------------------------------------
+// 穿透态的「兜底」与「重挂」:
+// forward:true 的 mousemove 转发并不是一定可靠的——窗口 hide→show 后、GPU 进程重建后,
+// 转发链路可能静默失效(不报错,就是不转发)。此时渲染层收不到 mousemove,悬停检测永远
+// 不触发,浮层会一直停在穿透态(表现:聚焦保存→取消、或托盘隐藏再显示后,工具栏/浮层
+// 点不动)。因此这里做两件事:
+//   ①窗口重新显示后重挂一次 setIgnoreMouseEvents,让转发钩子重新生效;
+//   ②主动把鼠标位置推给渲染层,由渲染层用 elementFromPoint 自行判定悬停,
+//     完全不依赖转发链路(也解决「对话框关闭后鼠标不动、等不到 mousemove」)。
+// ---------------------------------------------------------------------------
+let cursorSyncTimer: ReturnType<typeof setInterval> | null = null;
+let lastSyncedCursor: { x: number; y: number } | null = null;
+
+// 推送当前鼠标位置(换算成渲染层 CSS 像素)。force=false 时位置没变则不重复推送。
+function syncCursorToRenderer(force = false): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  try {
+    const cursor = screen.getCursorScreenPoint();
+    const bounds = win.getContentBounds();
+    const p = { x: Math.round(cursor.x - bounds.x), y: Math.round(cursor.y - bounds.y) };
+    if (!force && lastSyncedCursor && lastSyncedCursor.x === p.x && lastSyncedCursor.y === p.y) return;
+    lastSyncedCursor = p;
+    win.webContents.send('pointer:sync-cursor', p);
+  } catch (err) {
+    console.warn('[pointer] 同步鼠标位置失败:', (err as Error)?.message ?? String(err));
+  }
+}
+
+// 兜底轮询:仅在「穿透态」下每 60ms 推一次鼠标位置(位置变化才真发),
+// 一旦切成交互态就停(此时窗口能收到真实 DOM 鼠标事件,无需兜底)。
+function startCursorSyncFallback(): void {
+  if (cursorSyncTimer) return;
+  cursorSyncTimer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+    if (pointerInteractive) return;
+    syncCursorToRenderer();
+  }, 60);
+}
+
+// 窗口重新显示后重挂「穿透 + forward」状态。传值就是渲染层最近一次上报的
+// pointerInteractive,与渲染层缓存保持一致,不会造成状态失同步。
+function reapplyPassthrough(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.setIgnoreMouseEvents(!pointerInteractive, { forward: true });
+    diag(`reapply ignore=${!pointerInteractive} visible=${win.isVisible()}`);
+  } catch (err) {
+    console.warn('[pointer] 重挂穿透状态失败:', (err as Error)?.message ?? String(err));
+  }
+  // 立即推一次鼠标位置:让渲染层不等 mousemove 就能纠正穿透状态
+  syncCursorToRenderer(true);
 }
 
 // 系统托盘:常驻托盘,无任务栏图标;点击显示/隐藏悬浮层,右键退出
@@ -371,19 +448,11 @@ interface SpotlightRect {
   h: number;
 }
 
-// 截取屏幕指定区域 → 返回 PNG dataURL(base64)
-// hideWindow=true 时截屏前先隐藏悬浮窗口(用于「保存」「插入白板」,需干净桌面画面);
-// hideWindow=false 时保持窗口显示(用于「放大镜」,由渲染层提前隐藏边框/手柄装饰,
-// 避免 hide→show 导致的窗口闪烁/「卡死」)。
-async function captureScreenRect(rect: SpotlightRect, hideWindow = true): Promise<string | null> {
-  const win = mainWindow;
-  // 截屏前先隐藏悬浮窗口:否则关灯遮罩 / 挖孔框 / 蓝色边框 / 手柄会被一并截入,
-  // 导致「插入白板」「保存」「放大镜」截到的是带遮罩的脏画面。
-  if (hideWindow && win && win.isVisible()) {
-    win.hide();
-    // 等待 DWM 合成器移除窗口画面后再截,否则仍可能残留上一帧
-    await new Promise((r) => setTimeout(r, 120));
-  }
+// 截取屏幕指定区域 → 返回 PNG dataURL(base64)。
+// 调用方必须保证「窗口上没有需要排除的装饰」:聚焦层(遮罩/挖孔框/手柄)由渲染层先卸载,
+// 放大镜标题装饰由渲染层先隐藏。这里不再隐藏/移动窗口——实测「真实点击后隐藏或移出屏幕
+// 再恢复」会让这个透明无激活窗口永久丢失鼠标按下事件(整个浮层点不动)。
+async function captureScreenRect(rect: SpotlightRect): Promise<string | null> {
   try {
     const display = screen.getPrimaryDisplay();
     const sf = display.scaleFactor || 1;
@@ -409,80 +478,39 @@ async function captureScreenRect(rect: SpotlightRect, hideWindow = true): Promis
   } catch (err) {
     console.warn('[spotlight] 截屏失败:', (err as Error)?.message ?? String(err));
     return null;
-  } finally {
-    // 恢复显示(不激活、不抢前台焦点,保持 focusable:false)
-    if (hideWindow && win && !win.isVisible()) {
-      win.showInactive();
-      win.setFocusable(false);
-    }
   }
 }
 
-// 隐藏悬浮窗口(等待 DWM 合成器移除画面),用于弹原生对话框前避开 alwaysOnTop 遮挡。
-// 解除置顶即可;窗口已 hide(),不会再挡住原生对话框。
-async function hideFloatingWindow(): Promise<void> {
-  if (!mainWindow) return;
-  try {
-    mainWindow.setAlwaysOnTop(false);
-  } catch { /* ignore */ }
-  // 注意:不要在这里改 setIgnoreMouseEvents。渲染层 usePointerPassthrough 用
-  // lastState 缓存做增量上报,主进程一旦直接改穿透状态就会与之失同步,
-  // 导致保存后工具栏/聚焦按钮「点不动」(穿透状态卡死)。
-  mainWindow.hide();
-  await new Promise((r) => setTimeout(r, 120));
-}
-
-// 恢复悬浮窗口显示(不激活、不抢前台焦点,保持 focusable:false)
-function restoreFloatingWindow(): void {
-  if (!mainWindow) return;
-  if (!mainWindow.isVisible()) {
-    mainWindow.showInactive();
-  }
-  mainWindow.setFocusable(false);
-  try {
-    mainWindow.setAlwaysOnTop(true, 'floating');
-  } catch { /* ignore */ }
-}
 
 function registerSpotlightControl(): void {
-  // 截屏返回 dataURL(供插入白板/放大镜)
-  ipcMain.handle('spotlight:capture', async (_e, rect: SpotlightRect, opts?: { hideWindow?: boolean }) => {
-    return captureScreenRect(rect, opts?.hideWindow ?? true);
+  // 截屏返回 dataURL(供插入白板/放大镜)。调用前渲染层需先卸载聚焦层/隐藏装饰。
+  ipcMain.handle('spotlight:capture', async (_e, rect: SpotlightRect) => {
+    return captureScreenRect(rect);
   });
 
-  // 保存到文件(弹出保存对话框)
-  ipcMain.handle('spotlight:save', async (_e, rect: SpotlightRect) => {
+  // 快速保存聚焦截图:直接存到「图片/C30聚焦/聚焦_<时间>.png」,由渲染层弹提示。
+  // 重要:这里刻意不使用原生「另存为」对话框(dialog.showSaveDialog)——
+  // Windows 上该原生模态窗口关闭后,会让本浮层(透明 + WS_EX_NOACTIVATE + type:'toolbar')
+  // 丢掉鼠标「按下」事件(mousemove 仍能收到),表现为整个浮层「看得见、点不动」:
+  // 底部工具条/收起/侧边栏全部无响应,且 setIgnoreMouseEvents 重挂、移出屏幕都无法恢复,
+  // 只能重启应用。实测可稳定复现,故保存走「直接落盘 + 渲染层提示」的路径。
+  ipcMain.handle('spotlight:save-quick', async (_e, rect: SpotlightRect) => {
     try {
-      // 弹保存对话框前先隐藏悬浮窗口:悬浮层 alwaysOnTop(floating)+ 聚焦层全屏捕获鼠标,
-      // 若不隐藏会盖住/挡住原生「另存为」对话框,导致矩形选中框仍在、弹框无法点击。
-      // 不传 mainWindow 作 parent:悬浮窗口 focusable:false + type:'toolbar',
-      // 作为模态对话框父窗口时会导致对话框无法弹出(保存点击无反应)。
-      await hideFloatingWindow();
-
-      const { canceled, filePath } = await dialog.showSaveDialog({
-        title: '保存聚焦内容',
-        defaultPath: `聚焦_${Date.now()}.png`,
-        filters: [{ name: 'PNG 图片', extensions: ['png'] }],
-      });
-      if (canceled || !filePath) {
-        restoreFloatingWindow();
-        return { ok: false, canceled: true };
-      }
-
-      // 对话框确认后截屏:窗口已由 hideFloatingWindow 隐藏,直接截取干净画面
-      // (hideWindow=false,避免重复 hide/show 导致闪回)
-      const dataUrl = await captureScreenRect(rect, false);
-      if (!dataUrl) {
-        restoreFloatingWindow();
-        return { ok: false, error: '截屏失败' };
-      }
-      // 截图完成后恢复窗口(渲染层已在弹框前退出聚焦层,恢复后即为正常选择态)
-      restoreFloatingWindow();
-      const base64 = dataUrl.split(',')[1];
-      await writeFile(filePath, Buffer.from(base64, 'base64'));
+      // 截屏:聚焦层在点「保存」时已由渲染层卸载,窗口本身透明、不再有任何装饰,
+      // 因此这里既不需要隐藏、也不需要移出屏幕(两者都会让窗口丢失鼠标按下事件)。
+      const dataUrl = await captureScreenRect(rect);
+      if (!dataUrl) return { ok: false, error: '截屏失败' };
+      const dir = join(app.getPath('pictures'), 'C30聚焦');
+      await mkdir(dir, { recursive: true });
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const name = `聚焦_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.png`;
+      const filePath = join(dir, name);
+      await writeFile(filePath, Buffer.from(dataUrl.split(',')[1], 'base64'));
+      diag(`save-quick ok path=${filePath}`);
       return { ok: true, filePath };
     } catch (err) {
-      restoreFloatingWindow();
+      diag(`save-quick fail ${String(err)}`);
       return { ok: false, error: (err as Error)?.message ?? String(err) };
     }
   });
@@ -845,6 +873,7 @@ app.whenReady().then(async () => {
   // 打印实验开关 env 状态,便于确认环境变量是否真正生效(避免口头确认失效)
   console.log('[env-check] NO_CONSUME =', JSON.stringify(process.env.NO_CONSUME ?? '(未设置)'));
   console.log('[env-check] NO_FORWARD =', JSON.stringify(process.env.NO_FORWARD ?? '(未设置)'));
+  diag(`startup userData=${app.getPath('userData')}`);
   await loadSettings();
   registerWindowControls();
   registerLocalSessionServer();

@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { User, SessionMember } from '@c30/shared';
+import type { User, SessionMember, ImageItem, EraserMode } from '@c30/shared';
 import { io, type Socket } from 'socket.io-client';
 import FloatingDock, { TopStatusBar, BottomToolbar } from './FloatingDock';
 import Whiteboard, { type WhiteboardHandle } from './Whiteboard';
 import DesktopDrawLayer, { type DesktopDrawHandle } from './DesktopDrawLayer';
 import SpotlightLayer, { type Rect } from './SpotlightLayer';
 import type { PenConfig } from './PenPanel';
+import { DEFAULT_ERASER_RADIUS, DEFAULT_ERASER_MODE } from './EraserPanel';
 import usePointerPassthrough from '../hooks/usePointerPassthrough';
+import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
 // 发送端(教师端)主界面:免登录,启动即连接内嵌课堂服务器并创建课堂,悬浮组件散落桌面。
 export default function TeacherWorkspace({
@@ -30,9 +32,20 @@ export default function TeacherWorkspace({
     color: '#e5484d',
     strokeWidth: 1,
   });
+  // 板擦粗细(底部工具条「板擦」菜单调整,桌面批注层与白板共用)
+  const [eraserRadius, setEraserRadius] = useState<number>(DEFAULT_ERASER_RADIUS);
+  // 板擦擦除方式:清笔迹(整条清除)/ 区域擦除(只擦相交部分),白板与桌面批注共用
+  const [eraserMode, setEraserMode] = useState<EraserMode>(DEFAULT_ERASER_MODE);
+  // 浮层缩放(提示条等也跟随屏幕尺寸)
+  const uiScale = useOverlayScale();
   const drawLayerRef = useRef<DesktopDrawHandle>(null);
   // 白板操作句柄:白板模式下,底部工具条的撤销/重做/清空路由到白板内部
   const whiteboardRef = useRef<WhiteboardHandle>(null);
+
+  // 聚焦保存后的轻提示(显示保存路径/失败原因,4s 自动消失)
+  const [saveToast, setSaveToast] = useState('');
+  // 待插入白板的底图(聚焦「插入白板」):白板挂载后由 effect 交给它本地追加
+  const [pendingImage, setPendingImage] = useState<ImageItem | null>(null);
 
   // 教师端本地设置(开机自启/展示教室信息/允许互动),从主进程加载并持久化
   const [appSettings, setAppSettings] = useState({
@@ -55,6 +68,20 @@ export default function TeacherWorkspace({
       if (s) setAppSettings(s);
     });
   }, []);
+
+  // 聚焦保存提示:4s 后自动消失
+  useEffect(() => {
+    if (!saveToast) return;
+    const t = setTimeout(() => setSaveToast(''), 4000);
+    return () => clearTimeout(t);
+  }, [saveToast]);
+
+  // 白板挂载后,把「插入白板」的底图交给它本地追加(追加后清空 pending)
+  useEffect(() => {
+    if (!pendingImage || active !== 'whiteboard') return;
+    whiteboardRef.current?.appendImage(pendingImage);
+    setPendingImage(null);
+  }, [pendingImage, active]);
 
   // 鼠标穿透:白板全屏或聚焦模式时锁定捕获;其余(选择/画笔/板擦/互动等工具)
   // 均保持穿透——画笔/板擦批注由主进程全局鼠标钩子驱动,不锁定窗口,
@@ -150,7 +177,7 @@ export default function TeacherWorkspace({
       {/* 白板全屏(唯一的功能界面) */}
       {active === 'whiteboard' && (
         <div data-interactive style={{ position: 'absolute', inset: 0, pointerEvents: 'auto' }}>
-          <Whiteboard ref={whiteboardRef} socket={socket} roomCode={roomCode} isTeacher activeTool={activeTool} penConfig={penConfig} onExit={() => setActive('')} />
+          <Whiteboard ref={whiteboardRef} socket={socket} roomCode={roomCode} isTeacher activeTool={activeTool} penConfig={penConfig} eraserRadius={eraserRadius} eraserMode={eraserMode} onExit={() => setActive('')} />
         </div>
       )}
 
@@ -181,6 +208,10 @@ export default function TeacherWorkspace({
         onToolChange={setActiveTool}
         penConfig={penConfig}
         onPenConfigChange={setPenConfig}
+        eraserRadius={eraserRadius}
+        onEraserRadiusChange={setEraserRadius}
+        eraserMode={eraserMode}
+        onEraserModeChange={setEraserMode}
         onUndo={() =>
           active === 'whiteboard' ? whiteboardRef.current?.undo() : drawLayerRef.current?.undo()
         }
@@ -199,20 +230,53 @@ export default function TeacherWorkspace({
       <DesktopDrawLayer
         ref={drawLayerRef}
         config={penConfig}
+        eraserRadius={eraserRadius}
+        eraserMode={eraserMode}
         socket={socket}
         roomCode={roomCode}
         tool={active === 'whiteboard' ? null : activeTool === 'pen' ? 'pen' : activeTool === 'eraser' ? 'eraser' : null}
       />
 
+      {/* 聚焦保存提示(底部居中,不拦截鼠标) */}
+      {saveToast && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: scaled(110, uiScale),
+            left: '50%',
+            transform: 'translateX(-50%)',
+            maxWidth: '70vw',
+            padding: `${scaled(10, uiScale)}px ${scaled(18, uiScale)}px`,
+            borderRadius: scaled(16, uiScale),
+            background: 'rgba(27,27,31,0.95)',
+            color: '#e5e7eb',
+            fontSize: scaled(14, uiScale),
+            lineHeight: 1.4,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            zIndex: 95,
+          }}
+          title={saveToast}
+        >
+          {saveToast}
+        </div>
+      )}
+
       {/* 聚焦层(关灯遮罩 + 可调矩形框 + 放大/插入白板/保存) */}
       {activeTool === 'focus' && (
         <SpotlightLayer
           onClose={() => setActiveTool('select')}
-          onCapture={(rect: Rect, opts?: { hideWindow?: boolean }) =>
-            (window as any).api?.spotlight?.capture(rect, opts) ?? Promise.resolve(null)
+          onCapture={(rect: Rect) =>
+            (window as any).api?.spotlight?.capture(rect) ?? Promise.resolve(null)
           }
           onInsertToWhiteboard={async (rect: Rect) => {
-            // 截屏 → 切到白板 → 广播 image.append 插入图片
+            // 先退出聚焦层再截屏:聚焦层卸载后窗口上没有任何装饰,主进程无需隐藏/移动窗口
+            // (隐藏或移出屏幕 + 真实点击的组合会让窗口丢失鼠标按下事件,浮层会点不动)。
+            setActiveTool('select');
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
             const spotlightApi = (window as any).api?.spotlight;
             if (!spotlightApi) return;
             const dataUrl = await spotlightApi.capture(rect);
@@ -230,8 +294,10 @@ export default function TeacherWorkspace({
               seq: 0,
             };
             setActive('whiteboard');
-            setActiveTool('select');
-            // 切到白板后,若 socket 已就绪则广播 image.append(教师端也会经广播收到)
+            // 关键:教师端是插入发起方,服务端只把 whiteboard.event 转发给「其他」客户端,
+            // 所以这里必须自己本地插入一份,否则要等重新拉快照才能看到图片。
+            setPendingImage(item);
+            // 广播给接收端(学生端)
             if (socketRef.current && roomCode) {
               socketRef.current.emit('whiteboard.event', {
                 roomCode,
@@ -242,13 +308,17 @@ export default function TeacherWorkspace({
           onSave={async (rect: Rect) => {
             const spotlightApi = (window as any).api?.spotlight;
             if (!spotlightApi) return;
-            // 先退出聚焦层:卸载矩形选中框 + 恢复鼠标穿透,避免挡住原生「另存为」对话框
+            // 先退出聚焦层:卸载矩形选中框 + 恢复鼠标穿透,避免挡住后续操作
             setActiveTool('select');
-            // 等两帧,确保聚焦层卸载、穿透状态同步到主进程后再弹框
+            // 等两帧,确保聚焦层卸载、穿透状态同步到主进程后再截屏
             await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-            const res = await spotlightApi.save(rect);
-            if (res && !res.ok && !res.canceled) {
-              console.warn('[spotlight] 保存失败:', res.error);
+            // 注意:这里不用原生「另存为」对话框——Windows 上该原生模态窗口关闭后会让
+            // 浮层丢失鼠标按下事件(整个浮层点不动,只能重启),故直接保存到固定目录。
+            const res = await spotlightApi.saveQuick(rect);
+            if (res?.ok) {
+              setSaveToast(`已保存:${res.filePath}`);
+            } else {
+              setSaveToast(`保存失败:${res?.error ?? '未知错误'}`);
             }
           }}
         />

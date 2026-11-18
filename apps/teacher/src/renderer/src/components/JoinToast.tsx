@@ -1,3 +1,5 @@
+import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
+
 interface Toast {
   id: string;
   name: string;
@@ -5,15 +7,17 @@ interface Toast {
 
 // 右下角"XXX 加入教室"通知浮层(参考腾讯会议入会提示,自动淡出)
 export default function JoinToast({ toasts }: { toasts: Toast[] }) {
+  const s = useOverlayScale();
+  const px = (n: number) => scaled(n, s);
   return (
     <div
       style={{
         position: 'absolute',
-        right: 16,
-        bottom: 16,
+        right: px(16),
+        bottom: px(16),
         display: 'flex',
         flexDirection: 'column',
-        gap: 8,
+        gap: px(8),
         zIndex: 30,
         pointerEvents: 'none',
       }}
@@ -24,21 +28,21 @@ export default function JoinToast({ toasts }: { toasts: Toast[] }) {
           style={{
             background: 'rgba(17,24,39,0.88)',
             color: '#fff',
-            fontSize: 13,
-            padding: '10px 16px',
-            borderRadius: 10,
+            fontSize: px(14),
+            padding: `${px(10)}px ${px(16)}px`,
+            borderRadius: px(10),
             boxShadow: '0 6px 20px rgba(0,0,0,0.25)',
             display: 'flex',
             alignItems: 'center',
-            gap: 8,
+            gap: px(8),
             animation: 'c30-slide-in 0.3s ease',
             backdropFilter: 'blur(6px)',
           }}
         >
           <span
             style={{
-              width: 8,
-              height: 8,
+              width: px(8),
+              height: px(8),
               borderRadius: '50%',
               background: '#22c55e',
               flexShrink: 0,

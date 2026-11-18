@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
+import type { LucideIcon } from 'lucide-react';
 import type { User } from '@c30/shared';
 import {
   GraduationCap,
@@ -24,29 +25,31 @@ import {
   Check,
 } from 'lucide-react';
 import { useDrag } from '../hooks/useDrag';
+import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 import PenPanel, { type PenConfig } from './PenPanel';
 
 // C30 风格的桌面悬浮黑色组件:竖排导航(可左右贴边) + 右上角状态 + 底部工具条。
 // 竖条左右两侧各有一个折叠箭头(对应同一个组件),老师站在教室任一侧都能点开。
+// 所有浮层尺寸都按 useOverlayScale 动态缩放:屏幕越大浮层越大,远距离也能点中。
 
 interface NavItem {
   key: string;
   label: string;
-  icon: React.ReactNode;
+  Icon: LucideIcon;
 }
 
 const TEACHER_NAV: NavItem[] = [
-  { key: 'whiteboard', label: '白板', icon: <Presentation size={22} /> },
-  { key: 'class', label: '上课', icon: <GraduationCap size={22} /> },
-  { key: 'textbook', label: '课本', icon: <BookOpen size={22} /> },
-  { key: 'courseware', label: '课件', icon: <FileText size={22} /> },
-  { key: 'comment', label: '讲评', icon: <MonitorPlay size={22} /> },
+  { key: 'whiteboard', label: '白板', Icon: Presentation },
+  { key: 'class', label: '上课', Icon: GraduationCap },
+  { key: 'textbook', label: '课本', Icon: BookOpen },
+  { key: 'courseware', label: '课件', Icon: FileText },
+  { key: 'comment', label: '讲评', Icon: MonitorPlay },
 ];
 
 const STUDENT_NAV: NavItem[] = [
-  { key: 'class', label: '上课', icon: <GraduationCap size={22} /> },
-  { key: 'courseware', label: '课件', icon: <FileText size={22} /> },
-  { key: 'whiteboard', label: '白板', icon: <Presentation size={22} /> },
+  { key: 'class', label: '上课', Icon: GraduationCap },
+  { key: 'courseware', label: '课件', Icon: FileText },
+  { key: 'whiteboard', label: '白板', Icon: Presentation },
 ];
 
 const TOOLBAR = [
@@ -83,16 +86,44 @@ export default function FloatingDock({
   // 垂直位置(默认居中),仅可上下拖动
   const [y, setY] = useState<number | null>(null);
 
+  const s = useOverlayScale();
+  const px = (n: number) => scaled(n, s);
+
   const navItems = role === 'TEACHER' ? TEACHER_NAV : STUDENT_NAV;
 
-  const onDrag = useDrag('y', (p) => setY(p.y));
+  const dockRef = useRef<HTMLDivElement>(null);
+
+  // 把 top 夹在屏幕内(用当前组件自身高度:收起后的箭头比展开态矮,各自夹各自的)
+  const setTopClamped = useCallback((top: number, el: HTMLElement | null) => {
+    const h = el?.getBoundingClientRect().height ?? 0;
+    const maxTop = Math.max(8, window.innerHeight - h - 8);
+    setY(Math.max(8, Math.min(top, maxTop)));
+  }, []);
+
+  // 展开态拖动:按「侧栏自身矩形」算位移,不按把手的矩形(否则会跳 16px)
+  const startDockDrag = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const el = dockRef.current;
+    if (!el) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startClientY = e.clientY;
+    const startTop = el.getBoundingClientRect().top;
+    const onMoveEv = (ev: PointerEvent) => setTopClamped(startTop + (ev.clientY - startClientY), el);
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMoveEv);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMoveEv);
+    window.addEventListener('pointerup', onUp);
+  };
 
   const verticalStyle: React.CSSProperties = {
     top: y ?? '50%',
     transform: y != null ? 'none' : 'translateY(-50%)',
   };
 
-  // 折叠态:仅在当前贴边侧显示一个箭头(点击展开),另一侧不显示
+  // 折叠态:仅在当前贴边侧显示一个箭头(点击展开;按住可上下拖动调整位置)
   if (collapsed) {
     return (
       <div
@@ -105,10 +136,11 @@ export default function FloatingDock({
           ...verticalStyle,
         }}
       >
-        <CollapseArrow
+        <SideArrow
           direction={side}
-          onClick={() => setCollapsed(false)}
-          label="展开工具栏"
+          onOpen={() => setCollapsed(false)}
+          onMove={(top) => setY(top)}
+          scale={s}
         />
       </div>
     );
@@ -116,19 +148,20 @@ export default function FloatingDock({
 
   return (
     <div
+      ref={dockRef}
       data-interactive
       style={{
         position: 'fixed',
-        [side]: 12,
+        [side]: px(12),
         ...verticalStyle,
-        width: 76,
+        width: px(82),
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         background: 'rgba(27, 27, 31, 0.92)',
-        borderRadius: 18,
-        paddingTop: 16,
-        paddingBottom: 16,
+        borderRadius: px(18),
+        paddingTop: px(16),
+        paddingBottom: px(16),
         boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
         pointerEvents: 'auto',
         zIndex: 80,
@@ -136,22 +169,22 @@ export default function FloatingDock({
     >
       {/* 顶部拖拽手柄(上下拖动) */}
       <div
-        onPointerDown={onDrag}
+        onPointerDown={startDockDrag}
         title="上下拖动"
         style={{
           position: 'absolute',
-          top: -16,
+          top: -px(16),
           left: '50%',
           transform: 'translateX(-50%)',
-          width: 48,
-          height: 16,
+          width: px(52),
+          height: px(16),
           cursor: 'ns-resize',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <div style={{ width: 32, height: 5, borderRadius: 3, background: '#9ca3af' }} />
+        <div style={{ width: px(34), height: px(5), borderRadius: px(3), background: '#9ca3af' }} />
       </div>
 
       {/* 折叠按钮(贴边侧的对侧,垂直居中,半圆形) */}
@@ -162,14 +195,14 @@ export default function FloatingDock({
           position: 'absolute',
           top: '50%',
           transform: 'translateY(-50%)',
-          [side === 'right' ? 'left' : 'right']: -20,
-          width: 24,
-          height: 64,
+          [side === 'right' ? 'left' : 'right']: -px(20),
+          width: px(26),
+          height: px(68),
           border: 'none',
           cursor: 'pointer',
           background: 'rgba(27,27,31,0.95)',
           color: '#e5e7eb',
-          borderRadius: side === 'right' ? '12px 0 0 12px' : '0 12px 12px 0',
+          borderRadius: side === 'right' ? `${px(12)}px 0 0 ${px(12)}px` : `0 ${px(12)}px ${px(12)}px 0`,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -184,22 +217,23 @@ export default function FloatingDock({
           (e.currentTarget as HTMLButtonElement).style.background = 'rgba(27,27,31,0.95)';
         }}
       >
-        {side === 'right' ? <ChevronRight size={22} /> : <ChevronLeft size={22} />}
+        {side === 'right' ? <ChevronRight size={px(24)} /> : <ChevronLeft size={px(24)} />}
       </button>
 
       {/* 头像 + 名称 */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: px(5) }}>
         <button
           onClick={() => setMenuOpen((v) => !v)}
+          title="菜单"
           style={{
-            width: 46,
-            height: 46,
+            width: px(50),
+            height: px(50),
             borderRadius: '50%',
             border: 'none',
             cursor: 'pointer',
             background: role === 'TEACHER' ? '#2563eb' : '#16a34a',
             color: '#fff',
-            fontSize: 18,
+            fontSize: px(19),
             fontWeight: 600,
             display: 'flex',
             alignItems: 'center',
@@ -209,33 +243,36 @@ export default function FloatingDock({
         >
           {user.name.charAt(0)}
         </button>
-        <span style={{ fontSize: 11, color: '#d1d5db', maxWidth: 64, textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span style={{ fontSize: px(12), color: '#d1d5db', maxWidth: px(70), textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {user.name}
         </span>
       </div>
 
       {/* 导航项 */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginTop: 16 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: px(10), marginTop: px(16) }}>
         {navItems.map((item) => {
           const isActive = active === item.key;
+          const Icon = item.Icon;
           return (
             <button
               key={item.key}
               onClick={() => onChange(item.key)}
               title={item.label}
               style={{
-                width: 54,
-                height: 54,
-                borderRadius: 14,
+                width: px(60),
+                height: px(60),
+                borderRadius: px(14),
                 border: 'none',
                 cursor: 'pointer',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: 3,
-                background: isActive ? 'rgba(255,255,255,0.16)' : 'transparent',
+                gap: px(3),
+                // 选中态:实心蓝底 + 白字 + 外发光
+                background: isActive ? 'linear-gradient(180deg, #3b82f6 0%, #2563eb 100%)' : 'transparent',
                 color: isActive ? '#ffffff' : '#9ca3af',
+                boxShadow: isActive ? '0 0 0 2px rgba(96,165,250,0.28), 0 6px 18px rgba(37,99,235,0.45)' : 'none',
                 transition: 'all .16s ease',
                 outline: 'none',
                 padding: 0,
@@ -247,8 +284,8 @@ export default function FloatingDock({
                 if (!isActive) (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
               }}
             >
-              {item.icon}
-              <span style={{ fontSize: 11, lineHeight: 1 }}>{item.label}</span>
+              <Icon size={px(24)} />
+              <span style={{ fontSize: px(12), lineHeight: 1, fontWeight: isActive ? 600 : 400 }}>{item.label}</span>
             </button>
           );
         })}
@@ -259,9 +296,9 @@ export default function FloatingDock({
         <button
           title="窗口"
           style={{
-            width: 54,
-            height: 54,
-            borderRadius: 14,
+            width: px(60),
+            height: px(60),
+            borderRadius: px(14),
             border: 'none',
             cursor: 'pointer',
             background: 'transparent',
@@ -270,21 +307,21 @@ export default function FloatingDock({
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            gap: 3,
+            gap: px(3),
             outline: 'none',
             padding: 0,
           }}
         >
-          <LayoutGrid size={22} />
-          <span style={{ fontSize: 11 }}>窗口</span>
+          <LayoutGrid size={px(24)} />
+          <span style={{ fontSize: px(12) }}>窗口</span>
         </button>
         <button
           title="菜单"
           onClick={() => setMenuOpen((v) => !v)}
           style={{
-            width: 54,
-            height: 54,
-            borderRadius: 14,
+            width: px(60),
+            height: px(60),
+            borderRadius: px(14),
             border: 'none',
             cursor: 'pointer',
             background: 'transparent',
@@ -293,13 +330,13 @@ export default function FloatingDock({
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            gap: 3,
+            gap: px(3),
             outline: 'none',
             padding: 0,
           }}
         >
-          <Menu size={22} />
-          <span style={{ fontSize: 11 }}>菜单</span>
+          <Menu size={px(24)} />
+          <span style={{ fontSize: px(12) }}>菜单</span>
         </button>
       </div>
 
@@ -310,19 +347,19 @@ export default function FloatingDock({
           <div
             style={{
               position: 'absolute',
-              [side === 'right' ? 'left' : 'right']: 68,
-              bottom: 20,
-              width: 200,
+              [side === 'right' ? 'left' : 'right']: px(72),
+              bottom: px(20),
+              width: px(220),
               background: '#26262b',
-              borderRadius: 10,
+              borderRadius: px(10),
               border: '1px solid #3a3a40',
-              padding: 6,
+              padding: px(6),
               zIndex: 21,
             }}
           >
-            <div style={{ padding: '8px 10px 10px', borderBottom: '1px solid #3a3a40' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#fff' }}>{user.name}</div>
-              <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 2 }}>
+            <div style={{ padding: `${px(8)}px ${px(10)}px ${px(10)}px`, borderBottom: '1px solid #3a3a40' }}>
+              <div style={{ fontSize: px(15), fontWeight: 600, color: '#fff' }}>{user.name}</div>
+              <div style={{ fontSize: px(13), color: '#9ca3af', marginTop: px(2) }}>
                 {role === 'TEACHER' ? '教师账号' : '学生账号'}
               </div>
             </div>
@@ -333,18 +370,18 @@ export default function FloatingDock({
               }}
               style={{
                 width: '100%',
-                padding: '10px',
-                marginTop: 4,
+                padding: px(10),
+                marginTop: px(4),
                 border: 'none',
                 background: 'transparent',
                 color: '#f87171',
-                fontSize: 14,
+                fontSize: px(15),
                 textAlign: 'left',
-                borderRadius: 6,
+                borderRadius: px(6),
                 cursor: 'pointer',
                 display: role === 'STUDENT' ? 'none' : 'flex',
                 alignItems: 'center',
-                gap: 8,
+                gap: px(8),
               }}
             >
               退出登录
@@ -369,25 +406,26 @@ export default function FloatingDock({
         >
           <div
             style={{
-              width: 320,
+              width: px(360),
+              maxWidth: 'calc(100vw - 32px)',
               background: '#ffffff',
-              borderRadius: 14,
-              padding: 24,
+              borderRadius: px(14),
+              padding: px(24),
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ fontSize: 16, fontWeight: 600, color: '#1f2937' }}>确认退出登录?</div>
-            <p style={{ fontSize: 13, color: '#7c8494', margin: '10px 0 22px' }}>退出后需要重新登录才能继续使用。</p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+            <div style={{ fontSize: px(17), fontWeight: 600, color: '#1f2937' }}>确认退出登录?</div>
+            <p style={{ fontSize: px(14), color: '#7c8494', margin: `${px(10)}px 0 ${px(22)}px` }}>退出后需要重新连接课堂才能继续使用。</p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: px(10) }}>
               <button
                 onClick={() => setConfirmOpen(false)}
-                style={{ padding: '8px 16px', border: '1px solid #e2e5ea', borderRadius: 8, background: '#fff', color: '#4b5563', fontSize: 13, cursor: 'pointer' }}
+                style={{ padding: `${px(9)}px ${px(18)}px`, border: '1px solid #e2e5ea', borderRadius: px(8), background: '#fff', color: '#4b5563', fontSize: px(14), cursor: 'pointer' }}
               >
                 取消
               </button>
               <button
                 onClick={onLogout}
-                style={{ padding: '8px 16px', border: 'none', borderRadius: 8, background: '#e5484d', color: '#fff', fontSize: 13, cursor: 'pointer' }}
+                style={{ padding: `${px(9)}px ${px(18)}px`, border: 'none', borderRadius: px(8), background: '#e5484d', color: '#fff', fontSize: px(14), cursor: 'pointer' }}
               >
                 退出
               </button>
@@ -399,35 +437,90 @@ export default function FloatingDock({
   );
 }
 
-// 折叠箭头(贴边,点击展开)
-function CollapseArrow({
+// 贴边收起箭头:
+//   · 单击 = 展开;
+//   · 按住上下拖 = 调整位置(位移超过 4px 判为拖动,松手不触发展开);
+//   · 下方两道短横是「可拖动」的视觉提示。
+function SideArrow({
   direction,
-  onClick,
-  label,
+  onOpen,
+  onMove,
+  scale,
 }: {
   direction: 'left' | 'right';
-  onClick: () => void;
-  label: string;
+  onOpen: () => void;
+  onMove: (top: number) => void;
+  scale: number;
 }) {
+  const px = (n: number) => scaled(n, scale);
+  const dragRef = useRef<{ startY: number; startTop: number; moved: boolean } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = e.currentTarget;
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      /* 忽略捕获失败 */
+    }
+    dragRef.current = { startY: e.clientY, startTop: el.getBoundingClientRect().top, moved: false };
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const dy = e.clientY - d.startY;
+    if (!d.moved) {
+      if (Math.abs(dy) < 4) return;
+      d.moved = true;
+      setDragging(true);
+    }
+    const h = e.currentTarget.getBoundingClientRect().height;
+    const next = Math.max(8, Math.min(d.startTop + dy, window.innerHeight - h - 8));
+    onMove(next);
+  };
+
+  const onPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    setDragging(false);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* 忽略释放失败 */
+    }
+    if (d && !d.moved) onOpen();
+  };
+
   return (
     <button
-      onClick={onClick}
-      title={label}
+      type="button"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      title="点击展开 · 按住可上下拖动"
       style={{
-        width: 34,
-        height: 96,
+        width: px(38),
+        height: px(104),
         border: 'none',
-        cursor: 'pointer',
+        cursor: dragging ? 'ns-resize' : 'grab',
         background: 'rgba(27,27,31,0.95)',
         color: '#e5e7eb',
-        borderRadius: direction === 'left' ? '0 18px 18px 0' : '18px 0 0 18px',
+        borderRadius: direction === 'left' ? `0 ${px(18)}px ${px(18)}px 0` : `${px(18)}px 0 0 ${px(18)}px`,
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
+        gap: px(6),
         boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
         outline: 'none',
         padding: 0,
-        transition: 'background .15s ease, width .15s ease',
+        touchAction: 'none',
+        transition: 'background .15s ease',
       }}
       onMouseEnter={(e) => {
         (e.currentTarget as HTMLButtonElement).style.background = 'rgba(37,99,235,0.95)';
@@ -436,7 +529,12 @@ function CollapseArrow({
         (e.currentTarget as HTMLButtonElement).style.background = 'rgba(27,27,31,0.95)';
       }}
     >
-      {direction === 'left' ? <ChevronRight size={26} /> : <ChevronLeft size={26} />}
+      {direction === 'left' ? <ChevronRight size={px(28)} /> : <ChevronLeft size={px(28)} />}
+      {/* 拖动把手提示 */}
+      <span style={{ display: 'flex', flexDirection: 'column', gap: px(3), opacity: 0.5 }}>
+        <span style={{ width: px(14), height: px(2), borderRadius: px(1), background: 'currentColor' }} />
+        <span style={{ width: px(14), height: px(2), borderRadius: px(1), background: 'currentColor' }} />
+      </span>
     </button>
   );
 }
@@ -449,30 +547,32 @@ export function TopStatusBar({
   networkStatus: 'direct' | 'relay' | '';
   memberCount: number;
 }) {
+  const s = useOverlayScale();
+  const px = (n: number) => scaled(n, s);
   return (
     <div
       data-interactive
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 18,
-        padding: '0 20px',
-        height: 48,
+        gap: px(18),
+        padding: `0 ${px(20)}px`,
+        height: px(52),
         background: 'rgba(27,27,31,0.92)',
-        borderRadius: 16,
+        borderRadius: px(16),
         color: '#d1d5db',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#9ca3af', fontSize: 13 }}>
-        <Wifi size={16} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: px(6), color: '#9ca3af', fontSize: px(14) }}>
+        <Wifi size={px(17)} />
         <span>{networkStatus === 'direct' ? '局域网' : networkStatus === 'relay' ? '中继' : '离线'}</span>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#9ca3af', fontSize: 13 }}>
-        <UsersRound size={16} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: px(6), color: '#9ca3af', fontSize: px(14) }}>
+        <UsersRound size={px(17)} />
         <span>班级</span>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#9ca3af', fontSize: 13 }}>
-        <Users size={16} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: px(6), color: '#9ca3af', fontSize: px(14) }}>
+        <Users size={px(17)} />
         <span>{memberCount} 人</span>
       </div>
     </div>

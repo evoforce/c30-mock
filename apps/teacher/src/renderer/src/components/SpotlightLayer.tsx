@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { ZoomIn, ImagePlus, Save, X, Lightbulb } from 'lucide-react';
+import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
 // 聚焦层:C30 式「关灯」遮罩 + 可调矩形框。
 // 选中矩形区域保持清晰(挖孔),其余全屏覆盖黑色半透明遮罩。
@@ -8,8 +9,8 @@ import { ZoomIn, ImagePlus, Save, X, Lightbulb } from 'lucide-react';
 
 interface Props {
   onClose: () => void;
-  // 截取矩形框区域 → 返回 PNG dataURL。opts.hideWindow=false 时主进程保持窗口显示(放大镜用)
-  onCapture: (rect: Rect, opts?: { hideWindow?: boolean }) => Promise<string | null>;
+  // 截取矩形框区域 → 返回 PNG dataURL。调用方负责保证窗口上没有装饰(本组件会先隐藏装饰)
+  onCapture: (rect: Rect) => Promise<string | null>;
   // 插入白板/保存:回调,由父组件处理
   onInsertToWhiteboard?: (rect: Rect) => void;
   onSave?: (rect: Rect) => void;
@@ -31,6 +32,8 @@ const ZOOM = 2;
 type HandlePos = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 export default function SpotlightLayer({ onClose, onCapture, onInsertToWhiteboard, onSave }: Props) {
+  const s = useOverlayScale();
+  const px = (n: number) => scaled(n, s);
   // 矩形框(逻辑坐标,相对窗口)
   const [rect, setRect] = useState<Rect>({
     x: window.innerWidth * 0.2,
@@ -60,11 +63,11 @@ export default function SpotlightLayer({ onClose, onCapture, onInsertToWhiteboar
     if (capturingRef.current) return;
     capturingRef.current = true;
     try {
-      // 先隐藏边框/手柄装饰(下一帧提交后再截),主进程保持窗口显示(hideWindow=false),
+      // 先隐藏边框/手柄装饰(下一帧提交后再截),
       // 避免 hide→show 导致的窗口闪烁与「点击放大/恢复卡死」。
       setHideDecorations(true);
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      const dataUrl = await onCapture(r, { hideWindow: false });
+      const dataUrl = await onCapture(r);
       if (dataUrl) setMagnifyImage(dataUrl);
     } finally {
       setHideDecorations(false);
@@ -161,20 +164,20 @@ export default function SpotlightLayer({ onClose, onCapture, onInsertToWhiteboar
   }, [onClose]);
 
   const handles: { pos: HandlePos; style: React.CSSProperties }[] = [
-    { pos: 'nw', style: { left: -5, top: -5, cursor: 'nwse-resize' } },
-    { pos: 'n', style: { left: '50%', top: -5, transform: 'translateX(-50%)', cursor: 'ns-resize' } },
-    { pos: 'ne', style: { right: -5, top: -5, cursor: 'nesw-resize' } },
-    { pos: 'e', style: { right: -5, top: '50%', transform: 'translateY(-50%)', cursor: 'ew-resize' } },
-    { pos: 'se', style: { right: -5, bottom: -5, cursor: 'nwse-resize' } },
-    { pos: 's', style: { left: '50%', bottom: -5, transform: 'translateX(-50%)', cursor: 'ns-resize' } },
-    { pos: 'sw', style: { left: -5, bottom: -5, cursor: 'nesw-resize' } },
-    { pos: 'w', style: { left: -5, top: '50%', transform: 'translateY(-50%)', cursor: 'ew-resize' } },
+    { pos: 'nw', style: { left: -px(6), top: -px(6), cursor: 'nwse-resize' } },
+    { pos: 'n', style: { left: '50%', top: -px(6), transform: 'translateX(-50%)', cursor: 'ns-resize' } },
+    { pos: 'ne', style: { right: -px(6), top: -px(6), cursor: 'nesw-resize' } },
+    { pos: 'e', style: { right: -px(6), top: '50%', transform: 'translateY(-50%)', cursor: 'ew-resize' } },
+    { pos: 'se', style: { right: -px(6), bottom: -px(6), cursor: 'nwse-resize' } },
+    { pos: 's', style: { left: '50%', bottom: -px(6), transform: 'translateX(-50%)', cursor: 'ns-resize' } },
+    { pos: 'sw', style: { left: -px(6), bottom: -px(6), cursor: 'nesw-resize' } },
+    { pos: 'w', style: { left: -px(6), top: '50%', transform: 'translateY(-50%)', cursor: 'ew-resize' } },
   ];
 
-  // 菜单尺寸(用于定位,估算)
-  const MENU_W = 5 * 60 + 4 * 6 + 24; // 约 348
-  const MENU_H = 72;
-  const GAP = 16;
+  // 菜单尺寸(用于定位,按缩放估算)
+  const MENU_W = 5 * px(66) + 4 * px(6) + px(24); // 约 348 → 随缩放变化
+  const MENU_H = px(64);
+  const GAP = px(16);
   // 菜单优先放框下方,空间不足则放框上方
   const below = rect.y + rect.h + GAP;
   const menuTop = below + MENU_H <= window.innerHeight ? below : Math.max(8, rect.y - GAP - MENU_H);
@@ -247,10 +250,11 @@ export default function SpotlightLayer({ onClose, onCapture, onInsertToWhiteboar
             onPointerUp={onPointerUp}
             style={{
               position: 'absolute',
-              width: 10,
-              height: 10,
+              width: px(12),
+              height: px(12),
               background: '#3b82f6',
-              borderRadius: 2,
+              border: `${px(2)}px solid #ffffff`,
+              borderRadius: px(3),
               ...h.style,
             }}
           />
@@ -264,28 +268,29 @@ export default function SpotlightLayer({ onClose, onCapture, onInsertToWhiteboar
           top: menuTop,
           left: menuLeft,
           display: 'flex',
-          gap: 6,
-          padding: '8px 12px',
-          borderRadius: 18,
+          gap: px(6),
+          padding: `${px(8)}px ${px(12)}px`,
+          borderRadius: px(18),
           background: '#1b1b1f',
           boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
           zIndex: 91,
         }}
       >
         <SpotBtn
-          icon={<Lightbulb size={20} />}
+          icon={<Lightbulb size={px(22)} />}
           label={darkened ? '开灯' : '关灯'}
           active={darkened}
           onClick={() => setDarkened((v) => !v)}
+          scale={s}
         />
         {mode === 'magnify' ? (
-          <SpotBtn icon={<ZoomIn size={20} />} label="恢复" active onClick={exitMagnify} />
+          <SpotBtn icon={<ZoomIn size={px(22)} />} label="恢复" active onClick={exitMagnify} scale={s} />
         ) : (
-          <SpotBtn icon={<ZoomIn size={20} />} label="放大" onClick={enterMagnify} />
+          <SpotBtn icon={<ZoomIn size={px(22)} />} label="放大" onClick={enterMagnify} scale={s} />
         )}
-        <SpotBtn icon={<ImagePlus size={20} />} label="插入白板" onClick={() => onInsertToWhiteboard?.(rect)} />
-        <SpotBtn icon={<Save size={20} />} label="保存" onClick={() => onSave?.(rect)} />
-        <SpotBtn icon={<X size={20} />} label="关闭" onClick={onClose} danger />
+        <SpotBtn icon={<ImagePlus size={px(22)} />} label="插入白板" onClick={() => onInsertToWhiteboard?.(rect)} scale={s} />
+        <SpotBtn icon={<Save size={px(22)} />} label="保存" onClick={() => onSave?.(rect)} scale={s} />
+        <SpotBtn icon={<X size={px(22)} />} label="关闭" onClick={onClose} danger scale={s} />
       </div>
     </div>
   );
@@ -297,37 +302,43 @@ function SpotBtn({
   onClick,
   active,
   danger,
+  scale,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   active?: boolean;
   danger?: boolean;
+  scale: number;
 }) {
+  const px = (n: number) => scaled(n, scale);
   return (
     <button
       onClick={onClick}
       title={label}
+      aria-pressed={active}
       style={{
-        width: 60,
-        height: 56,
-        borderRadius: 12,
+        width: px(66),
+        height: px(60),
+        borderRadius: px(12),
         border: 'none',
         cursor: 'pointer',
-        background: active ? 'rgba(255,255,255,0.2)' : 'transparent',
+        // 选中态:实心蓝底 + 白字(和底部工具条一致的选中语言)
+        background: active ? '#2563eb' : 'transparent',
         color: danger ? '#f87171' : active ? '#fff' : '#9ca3af',
+        boxShadow: active ? '0 0 0 2px rgba(96,165,250,0.3)' : 'none',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 3,
+        gap: px(3),
         outline: 'none',
         padding: 0,
         transition: 'background .15s ease',
       }}
     >
       {icon}
-      <span style={{ fontSize: 11, lineHeight: 1 }}>{label}</span>
+      <span style={{ fontSize: px(12), lineHeight: 1, fontWeight: active ? 600 : 400 }}>{label}</span>
     </button>
   );
 }

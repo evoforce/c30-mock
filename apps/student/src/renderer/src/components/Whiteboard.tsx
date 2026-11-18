@@ -19,6 +19,7 @@ import MemberOverlay from './MemberOverlay';
 import JoinToast from './JoinToast';
 import DanmakuLayer from './DanmakuLayer';
 import DanmakuInput from './DanmakuInput';
+import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
 const COLORS = [
   '#1f2937', '#e5484d', '#2563eb', '#16a34a',
@@ -74,6 +75,9 @@ interface DrawOp {
 }
 
 export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
+  // 浮层缩放:成员按钮/提示条等按屏幕尺寸等比放大
+  const uiScale = useOverlayScale();
+  const spx = (n: number) => scaled(n, uiScale);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // 渲染器:CanvasRenderer 实现,未来可换 NativeRenderer(C++)
   const rendererRef = useRef<CanvasRenderer | null>(null);
@@ -511,6 +515,29 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden', ...backgroundFor(theme) }}>
+        {/* 图片底图(教师端「插入白板」同步过来):放在 canvas 之前,
+            与 canvas 同为定位元素时按 DOM 顺序绘制 → 图片在下、笔迹在上。 */}
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          {images.map((img) => (
+            <img
+              key={img.id}
+              src={img.src}
+              alt=""
+              draggable={false}
+              style={{
+                position: 'absolute',
+                left: img.x,
+                top: img.y,
+                width: img.w,
+                height: img.h,
+                objectFit: 'contain',
+                pointerEvents: 'none',
+                userSelect: 'none',
+              }}
+            />
+          ))}
+        </div>
+
         <canvas
           ref={canvasRef}
           onPointerDown={onPointerDown}
@@ -518,6 +545,8 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
           onPointerUp={onPointerUp}
           style={{
             display: 'block',
+            // 必须显式定位:未定位的静态 canvas 会被后面的绝对定位图片盖住
+            position: 'relative',
             cursor: isTeacher
               ? tool.activeTool === 'eraser'
                 ? 'crosshair'
@@ -529,40 +558,20 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
           }}
         />
 
-        {/* 图片元素(聚焦「插入白板」):叠加在 canvas 之上 */}
-        {images.map((img) => (
-          <img
-            key={img.id}
-            src={img.src}
-            alt=""
-            draggable={false}
-            style={{
-              position: 'absolute',
-              left: img.x,
-              top: img.y,
-              width: img.w,
-              height: img.h,
-              objectFit: 'contain',
-              pointerEvents: 'none',
-              userSelect: 'none',
-            }}
-          />
-        ))}
-
         <DanmakuLayer danmakuList={danmakuList} />
 
         {!isTeacher && (
           <div
             style={{
               position: 'absolute',
-              top: 12,
+              top: spx(12),
               left: '50%',
               transform: 'translateX(-50%)',
               background: 'rgba(31,41,55,0.72)',
               color: '#fff',
-              fontSize: 12,
-              padding: '5px 12px',
-              borderRadius: 14,
+              fontSize: spx(13),
+              padding: `${spx(6)}px ${spx(14)}px`,
+              borderRadius: spx(14),
               pointerEvents: 'none',
             }}
           >
@@ -579,6 +588,7 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
           isTeacher={isTeacher}
           interaction={interaction}
           onInteractionChange={isTeacher ? updateInteraction : undefined}
+          rightOffset={spx(104)}
         />
 
         <JoinToast toasts={toasts} />
