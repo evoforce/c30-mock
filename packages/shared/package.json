@@ -1,6 +1,6 @@
 {
   "name": "@c30/shared",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "C30 共享类型、协议定义与常量",
   "main": "./src/index.ts",

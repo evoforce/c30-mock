@@ -1,6 +1,6 @@
 {
   "name": "@c30/mdsd",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "C30 mDNS 局域网发现封装(发布/订阅)",
   "main": "./src/index.ts",

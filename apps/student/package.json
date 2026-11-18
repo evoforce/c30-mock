@@ -1,6 +1,6 @@
 {
   "name": "@c30/student",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "C30 学生端(Electron + vite)",
   "main": "./out/main/index.js",

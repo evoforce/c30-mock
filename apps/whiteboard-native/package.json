@@ -1,6 +1,6 @@
 {
   "name": "@c30/whiteboard-native",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "C30 白板核心 C++ addon(N-API)",
   "main": "build/Release/whiteboard_native.node",
