@@ -12,7 +12,7 @@ import type {
   ImageItem,
   WhiteboardTheme,
 } from '@c30/shared';
-import { PEN_DEFAULT_OPACITY } from '@c30/shared';
+import { PEN_DEFAULT_OPACITY, sortImagesByZ } from '@c30/shared';
 import { CanvasRenderer } from './Renderer';
 import WhiteboardToolbar, { type ToolConfig } from './WhiteboardToolbar';
 import MemberOverlay from './MemberOverlay';
@@ -427,9 +427,17 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
         redrawAll();
       } else if (event.type === 'image.append') {
         const img = event.payload;
-        if (!imagesRef.current.some((x) => x.id === img.id)) {
-          imagesRef.current.push(img);
-        }
+        // 幂等 upsert:教师端「置顶」用 image.update 改 z,新图缺 z 时按最上层补一个
+        const idx = imagesRef.current.findIndex((x) => x.id === img.id);
+        const z = img.z ?? imagesRef.current.reduce((m, it) => Math.max(m, it.z ?? it.seq ?? 0), 0) + 1;
+        const next = { ...img, z };
+        if (idx >= 0) imagesRef.current[idx] = next;
+        else imagesRef.current.push(next);
+        setImages([...imagesRef.current]);
+      } else if (event.type === 'image.update') {
+        // 教师端拖动 / 缩放图片:按 id 覆盖,次序不变
+        const img = event.payload;
+        imagesRef.current = imagesRef.current.map((im) => (im.id === img.id ? img : im));
         setImages([...imagesRef.current]);
       } else if (event.type === 'image.remove') {
         const ids = event.payload.imageIds;
@@ -518,7 +526,7 @@ export default function Whiteboard({ socket, roomCode, isTeacher }: Props) {
         {/* 图片底图(教师端「插入白板」同步过来):放在 canvas 之前,
             与 canvas 同为定位元素时按 DOM 顺序绘制 → 图片在下、笔迹在上。 */}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-          {images.map((img) => (
+          {sortImagesByZ(images).map((img) => (
             <img
               key={img.id}
               src={img.src}

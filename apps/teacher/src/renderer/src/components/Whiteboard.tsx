@@ -13,7 +13,8 @@ import type {
   WhiteboardTheme,
   PenType,
 } from '@c30/shared';
-import { PEN_DEFAULT_OPACITY } from '@c30/shared';
+import { PEN_DEFAULT_OPACITY, sortImagesByZ } from '@c30/shared';
+import { ArrowUpToLine, Copy, Trash2 } from 'lucide-react';
 import { CanvasRenderer } from './Renderer';
 import {
   eraserRectAt,
@@ -128,7 +129,7 @@ const bottomBtnStyle = (scale: number): CSSProperties => ({
 
 // 一次绘制操作(用于本地 undo)
 interface DrawOp {
-  kind: 'append' | 'remove' | 'clear' | 'erase';
+  kind: 'append' | 'remove' | 'clear' | 'erase' | 'image.add' | 'image.del' | 'image.update';
   strokes?: Stroke[];
   removedStrokes?: Stroke[];
   clearedStrokes?: Stroke[];
@@ -136,6 +137,10 @@ interface DrawOp {
   // 区域擦除会把一条笔画切成多段,必须成对记录才能正确撤销/重做。
   eraseBefore?: Stroke[];
   eraseAfter?: Stroke[];
+  // 图片操作:add = 新增(复制/插入),del = 删除,update = 移动/缩放/置顶
+  image?: ImageItem;
+  imageBefore?: ImageItem;
+  imageAfter?: ImageItem;
 }
 
 export interface WhiteboardHandle {
@@ -201,6 +206,9 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       setSelection(null);
       setRubberBand(null);
       transformRef.current = null;
+      // 图片选中态也一并清掉(含操作按钮)
+      setImageSel(null);
+      imageDragRef.current = null;
     }
     // 切离板擦时收起矩形板擦(避免换了工具还残留一块白块)
     if (mapped !== 'eraser') {
@@ -228,6 +236,22 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
 
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+
+  // ---- 图片(聚焦「插入白板」的底图):选择 / 拖动 / 缩放 / 置顶 / 复制 / 删除 ----
+  // 图片本身 `pointerEvents:none`(不挡画笔),命中由画布上的 pointer 事件 + 几何判断完成。
+  const [imageSel, setImageSel] = useState<string | null>(null);
+  // 拖动 / 缩放中的临时状态(pointerdown → pointerup 一次手势)
+  const imageDragRef = useRef<{
+    mode: 'move' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+    id: string;
+    startX: number;
+    startY: number;
+    orig: { x: number; y: number; w: number; h: number };
+    // 图片原始宽高比,四角缩放时按住比例,避免把截图拉变形
+    ratio: number;
+  } | null>(null);
+  // 拖动中向学生端广播的最小间隔(ms):既实时又不刷爆 socket
+  const lastImageEmitRef = useRef(0);
 
   // 成员与互动状态
   const [members, setMembers] = useState<SessionMember[]>([]);
@@ -297,12 +321,17 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     }
   }, []);
 
-  // 发送白板事件到房间
-  const emit = (event: WhiteboardEvent) => {
-    if (socket && roomCode) {
-      socket.emit('whiteboard.event', { roomCode, event });
-    }
-  };
+  // 发送白板事件到房间。
+  // 用 useCallback 固定身份(随 socket/roomCode 变化),图片操作的 useCallback 依赖它,
+  // 否则会闭包到挂载时的空 socket,导致拖动/置顶/复制/删除都发不出去。
+  const emit = useCallback(
+    (event: WhiteboardEvent) => {
+      if (socket && roomCode) {
+        socket.emit('whiteboard.event', { roomCode, event });
+      }
+    },
+    [socket, roomCode],
+  );
 
   const syncStackState = () => {
     setCanUndo(undoStackRef.current.length > 0);
@@ -392,6 +421,8 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
 
     let removedStrokeIds: string[] = [];
     let restoredStrokes: Stroke[] = [];
+    // 图片操作单独处理(不走 stroke 的 undo 广播)
+    let imageEvent: WhiteboardEvent | null = null;
 
     if (op.kind === 'append' && op.strokes) {
       removedStrokeIds = op.strokes.map((s) => s.id);
@@ -408,11 +439,32 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       strokesRef.current = strokesRef.current.filter((s) => !removedStrokeIds.includes(s.id));
       restoredStrokes = op.eraseBefore;
       strokesRef.current.push(...op.eraseBefore);
+    } else if (op.kind === 'image.add' && op.image) {
+      // 撤销「新增/复制」:把这张图拿掉
+      imagesRef.current = imagesRef.current.filter((im) => im.id !== op.image!.id);
+      setImages([...imagesRef.current]);
+      setImageSel((cur) => (cur === op.image!.id ? null : cur));
+      imageEvent = { type: 'image.remove', payload: { imageIds: [op.image.id] } };
+    } else if (op.kind === 'image.del' && op.image) {
+      // 撤销「删除」:把原图(含原层序 z)放回来
+      imagesRef.current = [...imagesRef.current.filter((im) => im.id !== op.image!.id), op.image];
+      setImages([...imagesRef.current]);
+      setImageSel(op.image.id);
+      imageEvent = { type: 'image.append', payload: op.image };
+    } else if (op.kind === 'image.update' && op.imageBefore && op.imageAfter) {
+      // 撤销「移动/缩放/置顶」:恢复操作前的样子
+      imagesRef.current = imagesRef.current.map((im) => (im.id === op.imageBefore!.id ? op.imageBefore! : im));
+      setImages([...imagesRef.current]);
+      imageEvent = { type: 'image.update', payload: op.imageBefore };
     }
 
     redrawAll();
     syncStackState();
-    emit({ type: 'undo', payload: { removedStrokeIds, restoredStrokes } });
+    if (imageEvent) {
+      emit(imageEvent);
+    } else {
+      emit({ type: 'undo', payload: { removedStrokeIds, restoredStrokes } });
+    }
   };
 
   // 重做:本地重做 + 广播(undo 的逆操作)
@@ -423,6 +475,7 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
 
     let removedStrokeIds: string[] = [];
     let restoredStrokes: Stroke[] = [];
+    let imageEvent: WhiteboardEvent | null = null;
 
     if (op.kind === 'append' && op.strokes) {
       restoredStrokes = op.strokes;
@@ -438,17 +491,35 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       strokesRef.current = strokesRef.current.filter((s) => !removedStrokeIds.includes(s.id));
       restoredStrokes = op.eraseAfter;
       strokesRef.current.push(...op.eraseAfter);
+    } else if (op.kind === 'image.add' && op.image) {
+      imagesRef.current = [...imagesRef.current.filter((im) => im.id !== op.image!.id), op.image];
+      setImages([...imagesRef.current]);
+      imageEvent = { type: 'image.append', payload: op.image };
+    } else if (op.kind === 'image.del' && op.image) {
+      imagesRef.current = imagesRef.current.filter((im) => im.id !== op.image!.id);
+      setImages([...imagesRef.current]);
+      imageEvent = { type: 'image.remove', payload: { imageIds: [op.image.id] } };
+    } else if (op.kind === 'image.update' && op.imageBefore && op.imageAfter) {
+      imagesRef.current = imagesRef.current.map((im) => (im.id === op.imageAfter!.id ? op.imageAfter! : im));
+      setImages([...imagesRef.current]);
+      imageEvent = { type: 'image.update', payload: op.imageAfter };
     }
 
     redrawAll();
     syncStackState();
-    emit({ type: 'undo', payload: { removedStrokeIds, restoredStrokes } });
+    if (imageEvent) {
+      emit(imageEvent);
+    } else {
+      emit({ type: 'undo', payload: { removedStrokeIds, restoredStrokes } });
+    }
   };
 
-  // 本地插入图片(底图):教师端作为插入发起方自己先应用一份,不依赖 socket 回环
+  // 本地插入图片(底图):教师端作为插入发起方自己先应用一份,不依赖 socket 回环。
+  // 新图统一取最大 z(压在最上层),否则新插入的图会因为 seq=0 被排到旧图下面。
   const appendImage = useCallback((img: ImageItem) => {
     if (imagesRef.current.some((x) => x.id === img.id)) return;
-    imagesRef.current = [...imagesRef.current, img];
+    const z = img.z ?? imagesRef.current.reduce((m, it) => Math.max(m, it.z ?? it.seq ?? 0), 0) + 1;
+    imagesRef.current = [...imagesRef.current, { ...img, z }];
     setImages(imagesRef.current);
   }, []);
 
@@ -465,6 +536,117 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
     const rect = canvas.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
+
+  // ---- 图片编辑:命中 / 更新 / 置顶 / 复制 / 删除 ----
+  /** 当前选中的图片(选中态只存 id,尺寸/位置从最新数组里取,拖动时始终是活的) */
+  const selectedImage = imageSel ? imagesRef.current.find((im) => im.id === imageSel) ?? null : null;
+  const imageBox = selectedImage
+    ? { x: selectedImage.x, y: selectedImage.y, w: selectedImage.w, h: selectedImage.h }
+    : null;
+
+  /** 命中测试:从最上层(z 最大)往下找第一张包含该点的图片 */
+  const hitImageAt = (x: number, y: number): ImageItem | null => {
+    const list = sortImagesByZ(imagesRef.current);
+    for (let i = list.length - 1; i >= 0; i--) {
+      const im = list[i];
+      if (x >= im.x && x <= im.x + im.w && y >= im.y && y <= im.y + im.h) return im;
+    }
+    return null;
+  };
+
+  /** 下一层的 z 值(比所有图片都大 = 最上层) */
+  const nextImageZ = () =>
+    imagesRef.current.reduce((max, im) => Math.max(max, im.z ?? im.seq ?? 0), 0) + 1;
+
+  /** 记一步图片操作(与笔画共用一个撤销栈) */
+  const pushImageOp = (op: DrawOp) => {
+    undoStackRef.current.push(op);
+    if (undoStackRef.current.length > 100) undoStackRef.current.shift();
+    redoStackRef.current = [];
+    syncStackState();
+  };
+
+  /** 本地更新一张图片(位置/尺寸),并同步到界面 */
+  const applyImageLocal = (next: ImageItem) => {
+    imagesRef.current = imagesRef.current.map((im) => (im.id === next.id ? next : im));
+    setImages([...imagesRef.current]);
+  };
+
+  /** 把手势中的位置/尺寸同步给学生端(节流,拖动时约 20fps) */
+  const emitImageUpdate = (next: ImageItem, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastImageEmitRef.current < 50) return;
+    lastImageEmitRef.current = now;
+    emit({ type: 'image.update', payload: next });
+  };
+
+  /** 置顶:把 z 提到最大(叠放次序由 z 决定,两端一致;可撤销) */
+  const bringImageToFront = useCallback(
+    (id: string) => {
+      const im = imagesRef.current.find((x) => x.id === id);
+      if (!im) return;
+      const before = { ...im };
+      const after: ImageItem = { ...im, z: nextImageZ() };
+      applyImageLocal(after);
+      emit({ type: 'image.update', payload: after });
+      pushImageOp({ kind: 'image.update', imageBefore: before, imageAfter: after });
+    },
+    [emit],
+  );
+
+  /** 复制:错开 24px 贴一张新图(z 取最大),并直接选中新图 */
+  const duplicateImage = useCallback(
+    (id: string) => {
+      const im = imagesRef.current.find((x) => x.id === id);
+      if (!im) return;
+      const copy: ImageItem = {
+        ...im,
+        id: crypto.randomUUID(),
+        x: im.x + 24,
+        y: im.y + 24,
+        z: nextImageZ(),
+        seq: 0,
+      };
+      imagesRef.current = [...imagesRef.current, copy];
+      setImages([...imagesRef.current]);
+      setImageSel(copy.id);
+      emit({ type: 'image.append', payload: copy });
+      pushImageOp({ kind: 'image.add', image: copy });
+    },
+    [emit],
+  );
+
+  /** 删除:本地移除并广播(记入撤销栈,可以撤销) */
+  const removeImage = useCallback(
+    (id: string) => {
+      const im = imagesRef.current.find((x) => x.id === id);
+      if (!im) return;
+      imagesRef.current = imagesRef.current.filter((x) => x.id !== id);
+      setImages([...imagesRef.current]);
+      setImageSel((cur) => (cur === id ? null : cur));
+      emit({ type: 'image.remove', payload: { imageIds: [id] } });
+      pushImageOp({ kind: 'image.del', image: { ...im } });
+    },
+    [emit],
+  );
+
+  // 键盘:Delete / Backspace 删除选中图片,Esc 取消选中
+  useEffect(() => {
+    if (!imageSel) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      // 正在输入框里打字时不抢键
+      if (t && t.closest('input, textarea, [contenteditable="true"]')) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        removeImage(imageSel);
+      } else if (e.key === 'Escape') {
+        setImageSel(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [imageSel, removeImage]);
 
   // 计算一组笔画的包围盒
   const computeBounds = (strokes: Stroke[]) => {
@@ -540,6 +722,46 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       return;
     }
     if (t.activeTool === 'select') {
+      // ① 已选中图片:先判手柄(缩放)、再判图片内部(移动)
+      if (selectedImage) {
+        const box = { x: selectedImage.x, y: selectedImage.y, w: selectedImage.w, h: selectedImage.h };
+        const handle = hitHandle(box, x, y);
+        if (handle) {
+          imageDragRef.current = {
+            mode: handle,
+            id: selectedImage.id,
+            startX: x,
+            startY: y,
+            orig: box,
+            ratio: selectedImage.h > 0 ? selectedImage.w / selectedImage.h : 1,
+          };
+          setSelection(null);
+          setRubberBand(null);
+          canvasRef.current?.setPointerCapture(e.pointerId);
+          return;
+        }
+      }
+      // ② 点到某张图片(从上往下找):选中它并开始拖动
+      const hit = hitImageAt(x, y);
+      if (hit) {
+        setImageSel(hit.id);
+        setSelection(null);
+        setRubberBand(null);
+        transformRef.current = null;
+        imageDragRef.current = {
+          mode: 'move',
+          id: hit.id,
+          startX: x,
+          startY: y,
+          orig: { x: hit.x, y: hit.y, w: hit.w, h: hit.h },
+          ratio: hit.h > 0 ? hit.w / hit.h : 1,
+        };
+        canvasRef.current?.setPointerCapture(e.pointerId);
+        return;
+      }
+      // ③ 点到空白:取消图片选中
+      setImageSel(null);
+
       // 有选中框时:判断是否命中手柄/内部
       if (selection) {
         const handle = hitHandle(selection, x, y);
@@ -605,6 +827,55 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
+    // 图片:拖动移动 / 八向缩放(四角保持原比例,避免截图被拉变形)
+    const imgDrag = imageDragRef.current;
+    if (imgDrag) {
+      const { x, y } = getPos(e);
+      const im = imagesRef.current.find((it) => it.id === imgDrag.id);
+      if (!im) return;
+      const dx = x - imgDrag.startX;
+      const dy = y - imgDrag.startY;
+      const MIN = 24;
+      let next = { ...imgDrag.orig };
+
+      if (imgDrag.mode === 'move') {
+        next.x = imgDrag.orig.x + dx;
+        next.y = imgDrag.orig.y + dy;
+      } else {
+        const o = imgDrag.orig;
+        let { x: bx, y: by, w: bw, h: bh } = o;
+        const isCorner = imgDrag.mode.length === 2;
+        if (imgDrag.mode.includes('e')) bw = Math.max(MIN, o.w + dx);
+        if (imgDrag.mode.includes('w')) {
+          bw = Math.max(MIN, o.w - dx);
+          bx = o.x + (o.w - bw);
+        }
+        if (imgDrag.mode.includes('s')) bh = Math.max(MIN, o.h + dy);
+        if (imgDrag.mode.includes('n')) {
+          bh = Math.max(MIN, o.h - dy);
+          by = o.y + (o.h - bh);
+        }
+        // 四角:按原始宽高比联动另一个方向(以刚变化的那一边为准)
+        if (isCorner && imgDrag.ratio > 0) {
+          if (imgDrag.mode.includes('e') || imgDrag.mode.includes('w')) {
+            const newH = Math.max(MIN, bw / imgDrag.ratio);
+            if (imgDrag.mode.includes('n')) by = o.y + (o.h - newH);
+            bh = newH;
+          } else {
+            const newW = Math.max(MIN, bh * imgDrag.ratio);
+            if (imgDrag.mode.includes('w')) bx = o.x + (o.w - newW);
+            bw = newW;
+          }
+        }
+        next = { x: bx, y: by, w: bw, h: bh };
+      }
+
+      const updated: ImageItem = { ...im, x: Math.round(next.x), y: Math.round(next.y), w: Math.round(next.w), h: Math.round(next.h) };
+      applyImageLocal(updated);
+      emitImageUpdate(updated);
+      return;
+    }
+
     const tr = transformRef.current;
     // 选择工具:框选/移动/缩放
     if (tr) {
@@ -684,6 +955,27 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
   };
 
   const onPointerUp = () => {
+    // 图片拖动 / 缩放结束:补发最终位置,并把整次手势记成一步可撤销的操作
+    const imgDrag = imageDragRef.current;
+    if (imgDrag) {
+      imageDragRef.current = null;
+      const im = imagesRef.current.find((it) => it.id === imgDrag.id);
+      if (im) {
+        emitImageUpdate(im, true);
+        const before: ImageItem = {
+          ...im,
+          x: imgDrag.orig.x,
+          y: imgDrag.orig.y,
+          w: imgDrag.orig.w,
+          h: imgDrag.orig.h,
+        };
+        const changed =
+          before.x !== im.x || before.y !== im.y || before.w !== im.w || before.h !== im.h;
+        if (changed) pushImageOp({ kind: 'image.update', imageBefore: before, imageAfter: { ...im } });
+      }
+      return;
+    }
+
     // 板擦:松开即收起矩形板擦,并把整次擦除合成一步 undo
     if (erasingRef.current) {
       erasingRef.current = false;
@@ -829,8 +1121,13 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
       } else if (event.type === 'image.append') {
         const img = event.payload;
         if (!imagesRef.current.some((x) => x.id === img.id)) {
-          imagesRef.current.push(img);
+          const z = img.z ?? imagesRef.current.reduce((m, it) => Math.max(m, it.z ?? it.seq ?? 0), 0) + 1;
+          imagesRef.current.push({ ...img, z });
         }
+        setImages([...imagesRef.current]);
+      } else if (event.type === 'image.update') {
+        const img = event.payload;
+        imagesRef.current = imagesRef.current.map((im) => (im.id === img.id ? img : im));
         setImages([...imagesRef.current]);
       } else if (event.type === 'image.remove') {
         const ids = event.payload.imageIds;
@@ -930,7 +1227,7 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
             与 canvas 同为「定位元素」时按 DOM 顺序绘制 → 图片在下、笔迹在上,
             画笔/板擦可以正常覆盖到图片上方。 */}
         <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-          {images.map((img) => (
+          {sortImagesByZ(images).map((img) => (
             <img
               key={img.id}
               src={img.src}
@@ -1015,6 +1312,21 @@ const Whiteboard = forwardRef<WhiteboardHandle, Props>(function Whiteboard(
         {/* 选择变换框(选中后,带 8 手柄) */}
         {selection && (
           <SelectionBox box={selection} scale={uiScale} />
+        )}
+
+        {/* 图片选中:蓝色框 + 8 个手柄(拖动移动、四角等比缩放),
+            框上方浮出操作条:置顶 / 复制 / 删除 */}
+        {isTeacher && imageBox && selectedImage && (
+          <>
+            <SelectionBox box={imageBox} scale={uiScale} />
+            <ImageActionBar
+              box={imageBox}
+              scale={uiScale}
+              onFront={() => bringImageToFront(selectedImage.id)}
+              onDuplicate={() => duplicateImage(selectedImage.id)}
+              onDelete={() => removeImage(selectedImage.id)}
+            />
+          </>
         )}
 
         <DanmakuLayer danmakuList={danmakuList} />
@@ -1161,6 +1473,96 @@ export default Whiteboard;
 
 // 供工具栏引用颜色
 export { COLORS };
+
+// 图片操作条:选中图片后浮在框上方(上方放不下就挪到下方)。
+// 置顶 = 把图片移到图片数组末尾(最后绘制 = 最上层);复制 = 错开 24px 贴一张新图。
+function ImageActionBar({
+  box,
+  scale,
+  onFront,
+  onDuplicate,
+  onDelete,
+}: {
+  box: { x: number; y: number; w: number; h: number };
+  scale: number;
+  onFront: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
+}) {
+  const px = (n: number) => scaled(n, scale);
+  const barW = px(228);
+  const barH = px(40);
+  const gap = px(10);
+  const above = box.y - barH - gap >= 8;
+  const top = above ? box.y - barH - gap : box.y + box.h + gap;
+  const left = Math.max(8, Math.min(box.x, window.innerWidth - barW - 8));
+
+  const Btn = ({
+    label,
+    Icon,
+    onClick,
+    danger,
+  }: {
+    label: string;
+    Icon: typeof ArrowUpToLine;
+    onClick: () => void;
+    danger?: boolean;
+  }) => (
+    <button
+      onClick={onClick}
+      title={label}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: px(5),
+        padding: `${px(7)}px ${px(10)}px`,
+        borderRadius: px(9),
+        border: 'none',
+        cursor: 'pointer',
+        background: 'transparent',
+        color: danger ? '#f87171' : '#e5e7eb',
+        fontSize: px(12),
+        outline: 'none',
+        whiteSpace: 'nowrap',
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.1)';
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+      }}
+    >
+      <Icon size={px(15)} />
+      {label}
+    </button>
+  );
+
+  return (
+    <div
+      data-interactive
+      style={{
+        position: 'absolute',
+        left,
+        top,
+        display: 'flex',
+        alignItems: 'center',
+        gap: px(2),
+        padding: px(4),
+        background: 'rgba(27,27,31,0.95)',
+        borderRadius: px(12),
+        boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        zIndex: 20,
+        pointerEvents: 'auto',
+        userSelect: 'none',
+      }}
+    >
+      <Btn label="置顶" Icon={ArrowUpToLine} onClick={onFront} />
+      <Btn label="复制" Icon={Copy} onClick={onDuplicate} />
+      <Btn label="删除" Icon={Trash2} onClick={onDelete} danger />
+    </div>
+  );
+}
 
 // 选择变换框:蓝色边框 + 8 个手柄(四角 + 四边中点)
 function SelectionBox({ box, scale }: { box: { x: number; y: number; w: number; h: number }; scale: number }) {

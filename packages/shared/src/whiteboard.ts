@@ -53,6 +53,17 @@ export interface ImageItem {
   w: number;
   h: number;
   seq: number;
+  /**
+   * 叠放次序:数字越大越靠上层。
+   * 缺省时按 seq(再缺省按数组顺序)绘制,保持旧数据兼容;
+   * 「置顶 / 复制 / 撤销删除」都靠它还原层序,不依赖数组顺序,两端才一致。
+   */
+  z?: number;
+}
+
+/** 图片按叠放次序排列(小 → 大,末尾 = 最上层)。两端渲染与命中测试共用。 */
+export function sortImagesByZ(list: ImageItem[]): ImageItem[] {
+  return [...list].sort((a, b) => (a.z ?? a.seq ?? 0) - (b.z ?? b.seq ?? 0));
 }
 
 // ---- 笔锋宽度计算(速度敏感压感,两端共用) ----
@@ -126,6 +137,8 @@ export type WhiteboardEvent =
   | { type: 'stroke.clear'; payload: { pageNo: number } }
   // 图片元素(聚焦「插入白板」):贴一张图片到白板
   | { type: 'image.append'; payload: ImageItem }
+  // 图片改动(移动 / 缩放):按 id 覆盖,不改变叠放次序
+  | { type: 'image.update'; payload: ImageItem }
   | { type: 'image.remove'; payload: { imageIds: string[] } }
   // 撤销/重做:广播具体笔画变更(学生端复用 append/remove 语义,无需本地 undo 栈)
   | { type: 'undo'; payload: { removedStrokeIds: string[]; restoredStrokes: Stroke[] } }

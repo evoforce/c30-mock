@@ -112,7 +112,14 @@ export function createLocalSessionServer(): LocalSessionServer {
           room.strokes = room.strokes.filter((s) => !ids.has(s.id));
         } else if (event.type === 'image.append') {
           event.payload.seq = ++room.nextSeq;
-          room.images.push(event.payload);
+          // 幂等:同一 id 重复 append(例如「置顶」= remove + append)时原位覆盖,避免出现重复图片
+          const idx = room.images.findIndex((im) => im.id === event.payload.id);
+          if (idx >= 0) room.images[idx] = event.payload;
+          else room.images.push(event.payload);
+        } else if (event.type === 'image.update') {
+          // 移动 / 缩放:按 id 覆盖,不改变叠放次序
+          const idx = room.images.findIndex((im) => im.id === event.payload.id);
+          if (idx >= 0) room.images[idx] = { ...event.payload, seq: room.images[idx].seq };
         } else if (event.type === 'image.remove') {
           const ids = new Set(event.payload.imageIds);
           room.images = room.images.filter((im) => !ids.has(im.id));
