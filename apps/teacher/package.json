@@ -6,10 +6,13 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "node ../../scripts/dev-electron.mjs",
+    "predev": "node ../../scripts/verify-uiohook.mjs",
     "build": "electron-vite build",
+    "prebuild": "node ../../scripts/verify-uiohook.mjs",
     "build:win": "electron-vite build && electron-builder --win nsis",
     "preview": "electron-vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "verify:uiohook": "node ../../scripts/verify-uiohook.mjs --strict"
   },
   "build": {
     "appId": "com.c30.teacher",

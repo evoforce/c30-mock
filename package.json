@@ -5,6 +5,7 @@
   "packageManager": "pnpm@9.15.0",
   "description": "仿照教培软件 C30 教师端/学生端的局域网互动教学系统",
   "scripts": {
+    "postinstall": "node scripts/rebuild-uiohook.mjs --if-needed",
     "build": "turbo run build",
     "build:win": "turbo run build:win",
     "dev": "turbo run dev",
@@ -13,7 +14,8 @@
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
-    "rebuild:uiohook": "scripts\\rebuild-uiohook.bat"
+    "rebuild:uiohook": "node scripts/rebuild-uiohook.mjs",
+    "verify:uiohook": "node scripts/verify-uiohook.mjs --strict"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.10",
