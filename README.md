@@ -56,19 +56,27 @@ pnpm --filter student dev
 
 ## 发布与分发
 
-安装包由 GitHub Actions 构建后**直接发布到 GitHub Release**(不再只留在 Actions Artifacts 里),
-用户可在仓库的 Releases 页直接下载教师端/学生端安装包。
+版本号由 [Changesets](https://github.com/changesets/changesets) 决定:教师端/学生端在
+`.changeset/config.json` 的 `fixed` 组中保持同一版本,发布时安装包**直接进 GitHub Release**
+(不再只留在 Actions Artifacts 里)。
+
+**一键发布(推荐)**:在 Actions 页运行 `Build & Release Windows Installers`(需在 `main` 触发)。
+CI 会执行 `pnpm version-packages` 消费 `.changeset/*.md`(提升版本号 + 生成 CHANGELOG)→ 提交
+`chore(release): vX.Y.Z` 并打 tag → 构建双端安装包 → 用该版本创建 Release;可勾选草稿先预览。
+
+**本地发版(等价路径)**:本地 version 后提交、打 tag 再推送,CI 只做一致性校验
+(tag 必须等于 `package.json` 版本,且不能有未消费的 changeset):
 
 ```bash
-# 打 tag 并推送 → 自动构建,并创建同名 Release 上传安装包
-git tag v0.1.0
-git push origin v0.1.0
+pnpm changeset          # 写 changeset,随代码提交
+pnpm version-packages   # 消费 changeset:提升版本号 + 生成 CHANGELOG
+git add -A && git commit -m "chore(release): v0.2.0"
+git tag v0.2.0
+git push origin main v0.2.0
 ```
 
-也可在 Actions 页手动运行 `Build & Release Windows Installers`:可指定 tag(留空则自动生成
-`v<版本号>-build.<运行号>`),可勾选草稿先预览;重跑同一 tag 会覆盖该 Release 的附件。
-Release 附件包含两个安装包与 `SHA256SUMS.txt`,配置见
-[build-windows.yml](.github/workflows/build-windows.yml)。
+Release 附件包含两个安装包与 `SHA256SUMS.txt`,Release 说明里的「本次变更」直接取自 CHANGELOG。
+配置见 [build-windows.yml](.github/workflows/build-windows.yml)。
 
 ## 设计文档
 
