@@ -210,6 +210,56 @@ function createWindow(): void {
   startCursorSyncFallback();
 }
 
+// 原生模块「吞事件」实现版本号(与 node_modules/uiohook-napi/src/lib/addon.c 的
+// UIOHOOK_CONSUME_MODE_VERSION 对应):
+//   2 = 只吞 EVENT_MOUSE_PRESSED(放行 move/drag/release)—— 唯一允许使用的版本;
+//   1 或缺失 = 旧产物(吞 DRAGGED/RELEASED 或根本没有该能力)—— 会冻结光标,禁止开启。
+const CONSUME_MODE_PRESSED_ONLY = 2;
+
+// 启动自检结果缓存(只检查一次,避免每帧调用原生函数)
+let consumeModeChecked = false;
+let consumeModeOk = false;
+
+/**
+ * 校验当前加载的原生模块是否支持「只吞 PRESSED」。
+ *
+ * 为什么要这个自检(踩过三次的坑):
+ *   这个补丁是「补丁源码 + 手工编译的原生 .node」两级产物,两者都可能落后于
+ *   patches/uiohook-napi.patch。一旦加载到旧 .node(吞 DRAGGED/RELEASED),
+ *   setMouseConsume(true) 就会把「按下后的鼠标移动」一起吞掉 → 光标冻结、
+ *   老师只能 Ctrl+Alt+Del。因此宁可放弃「防止桌面误框选」,也绝不能在旧产物上开启。
+ */
+function consumeModeSupported(): boolean {
+  if (consumeModeChecked) return consumeModeOk;
+  consumeModeChecked = true;
+
+  const getMode = (uIOhook as unknown as { getConsumeMode?: () => number }).getConsumeMode;
+  if (typeof getMode !== 'function') {
+    console.error(
+      '[batch] 原生模块没有 getConsumeMode():加载到的是旧 prebuild 或旧编译产物,' +
+        '已禁用「吞 mousedown」(否则按下后光标会卡死)。修复:pnpm rebuild:uiohook',
+    );
+    consumeModeOk = false;
+    return false;
+  }
+  try {
+    const mode = Number(getMode.call(uIOhook));
+    consumeModeOk = mode === CONSUME_MODE_PRESSED_ONLY;
+    if (!consumeModeOk) {
+      console.error(
+        `[batch] 原生模块 consume-mode=${mode}(期望 ${CONSUME_MODE_PRESSED_ONLY}),` +
+          '不是「只吞 PRESSED」的版本,已禁用「吞 mousedown」。修复:pnpm rebuild:uiohook',
+      );
+    } else {
+      diag(`consume-mode=${mode}`);
+    }
+  } catch (err) {
+    console.error('[batch] 读取 consume-mode 失败,已禁用「吞 mousedown」:', (err as Error)?.message ?? String(err));
+    consumeModeOk = false;
+  }
+  return consumeModeOk;
+}
+
 // 设置「吞掉 mousedown」状态(带缓存,幂等)。当 on=true 时,C 层只吞
 // EVENT_MOUSE_PRESSED(放行 move/up),桌面收不到「按下」即不会框选/拖动,
 // 而光标仍可正常移动、笔迹正常绘制。
@@ -217,6 +267,10 @@ function applyConsume(on: boolean): void {
   // 临时实验开关:设置 NO_CONSUME=1 时禁用「吞 mousedown」,用于对照定位
   // 视频暂停问题是否由吞事件导致。
   if (process.env.NO_CONSUME === '1') {
+    on = false;
+  }
+  // 安全阀:旧原生产物会让光标卡死,直接降级为「不吞」
+  if (on && !consumeModeSupported()) {
     on = false;
   }
   if (on === consumeOn) return;

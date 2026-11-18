@@ -1,51 +1,72 @@
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-index bea57600bf7d03db29e4b38c76afe5d6d8cae1e1..2ca3d849f187e4ddb3c8441d1567e2ce9628bc62 100644
+index bea57600bf7d03db29e4b38c76afe5d6d8cae1e1..9783ec89e4f5003454cf9b08c421d63660bcc176 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
-@@ -189,6 +189,7 @@ declare class UiohookNapi extends EventEmitter {
+@@ -189,6 +189,8 @@ declare class UiohookNapi extends EventEmitter {
      stop(): void;
      keyTap(key: number, modifiers?: number[]): void;
      keyToggle(key: number, toggle: 'down' | 'up'): void;
 +    setMouseConsume(consume: boolean): void;
++    getConsumeMode(): number;
  }
  export declare const uIOhook: UiohookNapi;
  export {};
 diff --git a/dist/index.js b/dist/index.js
-index 61acc012eeb9ebcb75fc9ebaf3bbc3f677864a84..58b52b295d3cdc9ed61a2ea9ea9a4ed241cdf346 100644
+index 61acc012eeb9ebcb75fc9ebaf3bbc3f677864a84..c7dfdce0ce86f7edf9cdac03612a9d2d10b891ae 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -201,6 +201,9 @@ class UiohookNapi extends events_1.EventEmitter {
+@@ -201,6 +201,12 @@ class UiohookNapi extends events_1.EventEmitter {
      keyToggle(key, toggle) {
          lib.keyTap(key, (toggle === 'down' ? KeyToggle.Down : KeyToggle.Up));
      }
 +    setMouseConsume(consume) {
 +        lib.setMouseConsume(consume);
 +    }
++    getConsumeMode() {
++        return lib.getConsumeMode();
++    }
  }
  exports.uIOhook = new UiohookNapi();
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/src/lib/addon.c b/src/lib/addon.c
-index d4dffe9e74cb2da2dbb99b65dd92173702f8beb7..3f6bc6a48374422a2a1caefb8db9163bc17cfe80 100644
+index d4dffe9e74cb2da2dbb99b65dd92173702f8beb7..3661d2d4f0dfa913c2c6041dfdba68dd0b88a083 100644
 --- a/src/lib/addon.c
 +++ b/src/lib/addon.c
-@@ -8,7 +8,26 @@
+@@ -8,7 +8,43 @@
  static napi_threadsafe_function threadsafe_fn = NULL;
  static bool is_worker_running = false;
  
-+// Whether to consume mouse PRESSED events (drag/release must pass through).
-+// When true (while drawing), only PRESSED is swallowed so the cursor still moves.
++// Consume-mode version. Must match CONSUME_MODE_PRESSED_ONLY in main/index.ts.
++//   1 (old, forbidden) = consume PRESSED + RELEASED + DRAGGED. Swallowing DRAGGED
++//       freezes the cursor while the button is held (the "cannot move after press" bug).
++//   2 (current) = consume EVENT_MOUSE_PRESSED only; MOVED/DRAGGED/RELEASED pass through,
++//       so the cursor keeps moving and strokes keep drawing.
++// The JS layer verifies this at startup via getConsumeMode() and refuses to enable
++// setMouseConsume(true) when the check fails, so a stale build can never freeze the mouse.
++//
++// NOTE: keep this file ASCII-only. Chinese comments in a UTF-8 C file are decoded as
++// GBK by MSVC, and a trailing character whose trail byte is 0x5C turns the newline into
++// a line continuation, silently swallowing the next line (this exact bug broke #define
++// and the function body here).
++#define UIOHOOK_CONSUME_MODE_VERSION 2
++
++// Whether to consume the mouse PRESSED event (move/drag/release must pass through).
 +static volatile int g_consume_mouse = 0;
 +
  void dispatch_proc(uiohook_event* const event) {
-+  // Drawing interception: when enabled, mark mouse PRESSED as reserved=0x01;
-+  // events. libuiohook's mouse_hook_event_proc sees reserved==0x01 and skips
++  // Drawing interception: when enabled, set reserved=0x01 on mouse PRESSED only.
++  // libuiohook's mouse_hook_event_proc sees reserved==0x01 and skips
 +  // CallNextHookEx, so the event is swallowed (not delivered to the system).
++  //
++  // Why PRESSED only (do NOT add DRAGGED/RELEASED back):
++  //   - Desktop marquee/drag starts when the target receives WM_LBUTTONDOWN and then
++  //     WM_MOUSEMOVE, so swallowing PRESSED alone already prevents accidental marquee;
++  //   - Swallowing DRAGGED/RELEASED makes the system drop the movement itself, which
++  //     freezes the cursor (symptom: pen/eraser "cannot move after pressing the button").
 +  if (g_consume_mouse) {
 +    switch (event->type) {
 +      case EVENT_MOUSE_PRESSED:
-+      /* NOTE: RELEASED/DRAGGED 必须放行,否则拖动时光标被吞、卡死 */
-+      /* (libuiohook: reserved==0x01 时跳过 CallNextHookEx → 事件被系统丢弃) */
 +        event->reserved = 0x01;
 +        break;
 +      default:
@@ -56,13 +77,14 @@ index d4dffe9e74cb2da2dbb99b65dd92173702f8beb7..3f6bc6a48374422a2a1caefb8db9163b
    if (threadsafe_fn == NULL) return;
  
    uiohook_event* copied_event = malloc(sizeof(uiohook_event));
-@@ -311,6 +330,23 @@ napi_value AddonKeyTap (napi_env env, napi_callback_info info) {
+@@ -311,6 +347,36 @@ napi_value AddonKeyTap (napi_env env, napi_callback_info info) {
    return NULL;
  }
  
-+// Set whether to consume mouse pressed/released/dragged events.
-+// When true (while drawing), libuiohook will not call CallNextHookEx,
-+// so the event is not delivered to the underlying window.
++// Set whether to consume the mouse PRESSED event.
++// When true (while drawing), libuiohook will not call CallNextHookEx for PRESSED,
++// so the desktop does not enter "mouse down" state (no accidental marquee/drag),
++// while MOVED/DRAGGED/RELEASED still pass through and the cursor keeps moving.
 +napi_value AddonSetMouseConsume (napi_env env, napi_callback_info info) {
 +  size_t info_argc = 1;
 +  napi_value info_argv[1];
@@ -77,16 +99,33 @@ index d4dffe9e74cb2da2dbb99b65dd92173702f8beb7..3f6bc6a48374422a2a1caefb8db9163b
 +  return NULL;
 +}
 +
++// Returns the consume-mode version implemented by this binary (see the top of file).
++// The JS layer asserts this is 2 at startup. Anything else means a stale prebuild or a
++// stale build/Release artifact is loaded, which would swallow DRAGGED and freeze the
++// cursor, so the JS layer must refuse to enable consumption in that case.
++napi_value AddonGetConsumeMode (napi_env env, napi_callback_info info) {
++  (void)info;
++  napi_value version;
++  napi_status status = napi_create_int32(env, UIOHOOK_CONSUME_MODE_VERSION, &version);
++  NAPI_FATAL_IF_FAILED(status, "AddonGetConsumeMode", "napi_create_int32");
++  return version;
++}
++
  NAPI_MODULE_INIT() {
    napi_status status;
    napi_value export_fn;
-@@ -330,6 +366,11 @@ NAPI_MODULE_INIT() {
+@@ -330,6 +396,16 @@ NAPI_MODULE_INIT() {
    status = napi_set_named_property(env, exports, "keyTap", export_fn);
    NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_set_named_property");
  
 +  status = napi_create_function(env, NULL, 0, AddonSetMouseConsume, NULL, &export_fn);
 +  NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_create_function");
 +  status = napi_set_named_property(env, exports, "setMouseConsume", export_fn);
++  NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_set_named_property");
++
++  status = napi_create_function(env, NULL, 0, AddonGetConsumeMode, NULL, &export_fn);
++  NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_create_function");
++  status = napi_set_named_property(env, exports, "getConsumeMode", export_fn);
 +  NAPI_FATAL_IF_FAILED(status, "NAPI_MODULE_INIT", "napi_set_named_property");
 +
    status = napi_add_env_cleanup_hook(env, AddonCleanUp, NULL);
