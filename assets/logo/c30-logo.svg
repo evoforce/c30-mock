@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- C30 Logo · 教培互动教学 · 生成自 scripts/gen-logo.py -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#172554"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <path d="M57 43 H177 L213 79 V199 A14 14 0 0 1 199 213 H57 A14 14 0 0 1 43 199 V57 A14 14 0 0 1 57 43 Z" fill="#fff"/>
+  <g fill="none" stroke="#172554" stroke-width="9" stroke-linecap="round">
+    <path d="M86 87 A37 37 0 1 0 86 161"/>
+    <path d="M106 106 A22 20 0 1 1 150 106"/>
+    <path d="M106 143 A22 20 0 1 1 150 143"/>
+    <ellipse cx="170" cy="124" rx="20" ry="37"/>
+  </g>
+  <circle cx="196" cy="198" r="7" fill="#14B8A6"/>
+  <circle cx="176" cy="198" r="5" fill="#14B8A6"/>
+  <circle cx="158" cy="198" r="3" fill="#14B8A6"/>
+</svg>

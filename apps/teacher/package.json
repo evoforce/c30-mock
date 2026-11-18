@@ -23,6 +23,7 @@
     },
     "files": [
       "out/**/*",
+      "assets/**/*",
       "!node_modules/@c30/**",
       "!packages/**"
     ],

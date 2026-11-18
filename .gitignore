@@ -35,6 +35,11 @@ apps/whiteboard-native/build/
 apps/*/release/
 apps/*/out/
 
+# 例外:apps/*/build 是 electron-builder 的 buildResources(存放 icon.ico),
+# 必须入库,否则 CI 克隆后打包出的 exe 没有图标(本地有、CI 没有的典型坑)。
+!apps/*/build/
+apps/*/build/*.map
+
 # Database
 pgdata/
 minio-data/

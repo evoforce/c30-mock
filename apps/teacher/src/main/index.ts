@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, desktopCapturer } from 'electron';
 import { join } from 'path';
+import { existsSync } from 'fs';
 import { writeFile, readFile, appendFile, mkdir } from 'fs/promises';
 import { execFile } from 'child_process';
 import { networkInterfaces } from 'os';
@@ -357,10 +358,53 @@ function reapplyPassthrough(): void {
   syncCursorToRenderer(true);
 }
 
+// 托盘图标解析:优先用打包后的 assets/tray,回退到仓库 assets/logo/png,
+// 最后才退回内置 16x16 兜底(保证任何情况下托盘都不会「空白一块」)。
+// Windows 会按 DPI 选择:16(100%)/20(125%)/24(150%)/32(200%)/40(250%)/48。
+function trayIconPath(): string | null {
+  const candidates = [
+    // ① 打包后:electron-builder 把 build 之外的 assets 目录原样带入 resources
+    join(process.resourcesPath, 'assets', 'tray', 'tray-32.png'),
+    // ② 开发环境(__dirname = out/main)
+    join(__dirname, '../../assets/tray/tray-32.png'),
+    join(__dirname, '../../../../assets/tray/tray-32.png'),
+    // ③ 仓库源
+    join(__dirname, '../../../../assets/logo/png/tray-32.png'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) return p;
+    } catch {
+      /* 忽略权限等异常,继续下一个候选 */
+    }
+  }
+  return null;
+}
+
+function loadTrayImage(): Electron.NativeImage {
+  const p = trayIconPath();
+  if (p) {
+    const img = nativeImage.createFromPath(p);
+    if (!img.isEmpty()) {
+      console.log('[tray] 使用图标:', p);
+      return img;
+    }
+    console.warn('[tray] 图标文件存在但解码失败:', p);
+  }
+  // 兜底:生成一个 16x16 纯色图标(至少保证托盘可见、菜单可点)
+  const fallback = Buffer.alloc(16 * 16 * 4);
+  for (let i = 0; i < 16 * 16; i++) {
+    fallback[i * 4 + 0] = 0x1e; // R
+    fallback[i * 4 + 1] = 0x3a; // G
+    fallback[i * 4 + 2] = 0x8a; // B
+    fallback[i * 4 + 3] = 0xff; // A
+  }
+  return nativeImage.createFromBuffer(fallback, { width: 16, height: 16 });
+}
+
 // 系统托盘:常驻托盘,无任务栏图标;点击显示/隐藏悬浮层,右键退出
 function createTray(): void {
-  // 用 16x16 占位图标(纯色方块),后续可替换为正式 icon
-  const icon = nativeImage.createEmpty();
+  const icon = loadTrayImage();
   tray = new Tray(icon);
   tray.setToolTip('C30 教学');
   const menu = Menu.buildFromTemplate([
