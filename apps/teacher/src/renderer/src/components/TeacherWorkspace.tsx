@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { User, SessionMember, ImageItem } from '@c30/shared';
+import type { User, SessionMember, ImageItem, InteractionControl, StageMode } from '@c30/shared';
+import { countStudents } from '@c30/shared';
 import { io, type Socket } from 'socket.io-client';
 import FloatingDock, { TopStatusBar, BottomToolbar } from './FloatingDock';
 import Whiteboard, { type WhiteboardHandle } from './Whiteboard';
@@ -7,6 +8,8 @@ import DesktopDrawLayer, { type DesktopDrawHandle } from './DesktopDrawLayer';
 import SpotlightLayer, { type Rect } from './SpotlightLayer';
 import type { PenConfig } from './PenPanel';
 import { DEFAULT_ERASER_RADIUS } from './EraserPanel';
+import useInteract from '../hooks/useInteract';
+import useScreenShare from '../hooks/useScreenShare';
 import usePointerPassthrough from '../hooks/usePointerPassthrough';
 import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 
@@ -23,7 +26,13 @@ export default function TeacherWorkspace({
   const [socket, setSocket] = useState<Socket | null>(null);
   const [roomCode, setRoomCode] = useState('');
   const [members, setMembers] = useState<SessionMember[]>([]);
+  // 上课状态(null=未上课):老师点「上课」后置为开始时间并广播;
+  // 服务端持久这份状态,学生端据此决定「等待页 / 跟随画面」。
+  const [classStartedAt, setClassStartedAt] = useState<number | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  // 供 socket 事件回调读取最新值(事件注册一次,不能闭包到旧的 active/上课状态)
+  const classActiveRef = useRef(false);
+  const stageModeRef = useRef<StageMode>('screen');
   // 已发布 mDNS 广播的 roomCode(去重,避免 StrictMode 双挂载/重连重复广播)
   const publishedCodeRef = useRef('');
   // 画笔设置(提升到此处,供底部工具栏与桌面绘制层共享)
@@ -53,6 +62,16 @@ export default function TeacherWorkspace({
     allowInteraction: true,
   });
 
+  // 课堂互动控制(弹幕 + 允许互动总开关)。由 TeacherWorkspace 统一持有:
+  // 设置面板、成员面板、白板、互动面板都读写同一份状态,不会出现两边各存一份、互相覆盖。
+  const [interaction, setInteraction] = useState<InteractionControl>({
+    danmakuEnabled: true,
+    interactEnabled: true,
+  });
+
+  // 「互动」面板的数据源:状态来自内嵌服务端的 interact.state 快照
+  const interact = useInteract(socket, roomCode);
+
   const updateSettings = useCallback(
     (patch: Partial<typeof appSettings>) => {
       setAppSettings((prev) => ({ ...prev, ...patch }));
@@ -67,6 +86,41 @@ export default function TeacherWorkspace({
       if (s) setAppSettings(s);
     });
   }, []);
+
+  // 互动控制(弹幕开关 / 允许互动):写入本地状态并同步给课堂。
+  // 服务端是控制项的真源,学生端收到 interaction.control 后才知道能不能发弹幕、能不能举手。
+  const updateInteraction = useCallback(
+    (patch: Partial<InteractionControl>) => {
+      const next = { ...interaction, ...patch };
+      setInteraction(next);
+      // 成员面板里的「课堂互动」开关与设置里的「允许互动」是同一个总开关:
+      // 在成员面板关掉时同步回设置,避免两处 UI 状态不一致。
+      if (patch.interactEnabled !== undefined && patch.interactEnabled !== appSettings.allowInteraction) {
+        updateSettings({ allowInteraction: patch.interactEnabled });
+      }
+      const s = socketRef.current;
+      if (s && roomCode) s.emit('interaction.control', { roomCode, control: next });
+    },
+    [interaction, roomCode, appSettings.allowInteraction, updateSettings],
+  );
+
+  // 重连 / 其它端改动时恢复控制项
+  useEffect(() => {
+    if (!socket) return;
+    const onControl = (d: { control: InteractionControl }) => setInteraction(d.control);
+    socket.on('interaction.control', onControl);
+    return () => {
+      socket.off('interaction.control', onControl);
+    };
+  }, [socket]);
+
+  // 设置面板的「允许互动」是总开关:变更时同步到课堂(学生端互动入口随之显示/隐藏)。
+  // 依赖里带上 roomCode:课堂创建完成后再补发一次,避免课前改设置丢失。
+  useEffect(() => {
+    if (!roomCode) return;
+    updateInteraction({ interactEnabled: appSettings.allowInteraction });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appSettings.allowInteraction, roomCode]);
 
   // 聚焦保存提示:4s 后自动消失
   useEffect(() => {
@@ -120,6 +174,13 @@ export default function TeacherWorkspace({
     (s: Socket) => {
       s.on('session.created', (d: { roomCode: string }) => {
         setRoomCode(d.roomCode);
+        // 重连/HMR 后立即把当前舞台模式同步一次:否则服务端可能还停在旧模式,
+        // 学生端会卡在「老师白板」而老师其实已经回到桌面。
+        s.emit('stage.set', {
+          roomCode: d.roomCode,
+          stage: stageModeRef.current,
+          board: { w: window.innerWidth, h: window.innerHeight },
+        });
         // 去重:同一 roomCode 只广播一次 mDNS,避免 StrictMode/重连重复广播
         if (publishedCodeRef.current === d.roomCode) return;
         publishedCodeRef.current = d.roomCode;
@@ -128,12 +189,22 @@ export default function TeacherWorkspace({
       s.on('session.joined', (d: { roomCode: string; members: SessionMember[] }) => {
         setRoomCode(d.roomCode);
         setMembers(d.members);
+        // create/join 之后服务端才建立 socket 索引,此时再同步一次舞台模式最稳
+        s.emit('stage.set', {
+          roomCode: d.roomCode,
+          stage: stageModeRef.current,
+          board: { w: window.innerWidth, h: window.innerHeight },
+        });
       });
       s.on('session.memberJoin', (d: { member: SessionMember }) => {
         setMembers((prev) => (prev.some((m) => m.userId === d.member.userId) ? prev : [...prev, d.member]));
       });
       s.on('session.memberLeave', (d: { userId: string }) => {
         setMembers((prev) => prev.filter((m) => m.userId !== d.userId));
+      });
+      // 服务端广播的课堂状态:重连 / HMR 后恢复「正在上课」,也作为多端唯一真源
+      s.on('class.state', (d: { active: boolean; startedAt: number | null }) => {
+        setClassStartedAt(d.active ? d.startedAt : null);
       });
     },
     [publishToLan],
@@ -171,12 +242,89 @@ export default function TeacherWorkspace({
     };
   }, [bindEvents, user]);
 
+  // 右上角「人数」只统计学生:教师本人是课堂创建者,不计入学生人数。
+  // 否则一台学生机都没开时会显示 1,而会话/连接重建的瞬间又会显示 0(0/1 跳动)。
+  // 口径与学生端完全一致(shared.countStudents),避免教师端 1 / 学生端 2 的错位。
+  const studentCount = countStudents(members);
+
+  // 舞台模式:老师在白板里 → 学生看白板;其余(桌面/PPT/批注)→ 学生看屏幕共享。
+  const stageMode: StageMode = active === 'whiteboard' ? 'whiteboard' : 'screen';
+  const classActive = classStartedAt != null;
+  classActiveRef.current = classActive;
+  stageModeRef.current = stageMode;
+
+  // 屏幕共享:上课且处于「投屏」模式时采集主屏,给每个学生一路 WebRTC;
+  // 切白板只暂停视频轨,切回投屏立刻恢复。
+  useScreenShare({
+    socket,
+    roomCode,
+    classActive,
+    stage: stageMode,
+    onError: (message) => setSaveToast(message),
+  });
+
+  // 课堂中老师切换白板/桌面时,把舞台模式同步给学生端
+  useEffect(() => {
+    if (!classActive || !socket || !roomCode) return;
+    socket.emit('stage.set', {
+      roomCode,
+      stage: stageMode,
+      board: { w: window.innerWidth, h: window.innerHeight },
+    });
+  }, [classActive, stageMode, socket, roomCode]);
+
+  // 投屏时把老师光标也广播给学生(20Hz,叠加在 WebRTC 画面上)。
+  // 光标坐标就是老师悬浮层窗口的逻辑坐标,和学生端 board 是同一套。
+  useEffect(() => {
+    if (!classActive || stageMode !== 'screen' || !socket || !roomCode) return;
+    let last = 0;
+    const onMove = (e: MouseEvent) => {
+      const now = performance.now();
+      if (now - last < 50) return;
+      last = now;
+      socket.emit('cursor.move', { x: e.clientX, y: e.clientY });
+    };
+    window.addEventListener('mousemove', onMove);
+    return () => window.removeEventListener('mousemove', onMove);
+  }, [classActive, stageMode, socket, roomCode]);
+
+  // 上课/下课:先本地乐观更新(计时立即开始/停止),再把状态发给内嵌课堂服务器;
+  // 服务端统一广播给房间内所有端,学生端据此从「等待页」切到「跟随画面」或退回等待页。
+  const toggleClass = useCallback(() => {
+    const starting = classStartedAt == null;
+    const startedAt = starting ? Date.now() : null;
+    setClassStartedAt(startedAt);
+    const s = socketRef.current;
+    if (!s || !roomCode) return;
+    if (starting) {
+      s.emit('class.start', {
+        roomCode,
+        startedAt,
+        stage: stageMode,
+        board: { w: window.innerWidth, h: window.innerHeight },
+      });
+    } else {
+      s.emit('class.end', { roomCode });
+    }
+  }, [classStartedAt, roomCode, stageMode]);
+
   return (
     <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none' }}>
       {/* 白板全屏(唯一的功能界面) */}
       {active === 'whiteboard' && (
         <div data-interactive style={{ position: 'absolute', inset: 0, pointerEvents: 'auto' }}>
-          <Whiteboard ref={whiteboardRef} socket={socket} roomCode={roomCode} isTeacher activeTool={activeTool} penConfig={penConfig} eraserRadius={eraserRadius} onExit={() => setActive('')} />
+          <Whiteboard
+            ref={whiteboardRef}
+            socket={socket}
+            roomCode={roomCode}
+            isTeacher
+            activeTool={activeTool}
+            penConfig={penConfig}
+            eraserRadius={eraserRadius}
+            onExit={() => setActive('')}
+            interaction={interaction}
+            onInteractionChange={updateInteraction}
+          />
         </div>
       )}
 
@@ -185,9 +333,11 @@ export default function TeacherWorkspace({
         role="TEACHER"
         active={active}
         onChange={(key) => setActive(key === 'desktop' ? '' : key)}
+        classStartedAt={classStartedAt}
+        onToggleClass={toggleClass}
         user={user}
         onLogout={onLogout}
-        memberCount={members.filter((m) => m.role === 'STUDENT').length}
+        memberCount={studentCount}
         networkStatus="direct"
         settings={appSettings}
         onSettingsChange={updateSettings}
@@ -197,7 +347,7 @@ export default function TeacherWorkspace({
           设置项「展示教室信息」关闭时也隐藏 */}
       {active !== 'whiteboard' && appSettings.showClassInfo && (
         <div style={{ position: 'fixed', top: 12, right: 12, pointerEvents: 'auto' }}>
-          <TopStatusBar networkStatus="direct" memberCount={members.length} />
+          <TopStatusBar networkStatus="direct" memberCount={studentCount} />
         </div>
       )}
 
@@ -219,6 +369,9 @@ export default function TeacherWorkspace({
           active === 'whiteboard' ? whiteboardRef.current?.clear() : drawLayerRef.current?.clear()
         }
         allowInteraction={appSettings.allowInteraction}
+        members={members}
+        studentCount={studentCount}
+        interact={interact}
       />
 
       {/* 桌面批注层(常驻,切换工具不清空笔迹;由全局鼠标钩子驱动绘制/擦除)。

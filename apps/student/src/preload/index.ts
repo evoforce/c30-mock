@@ -23,6 +23,12 @@ const api = {
       ipcRenderer.on('discovery:found', listener);
       return () => ipcRenderer.removeListener('discovery:found', listener);
     },
+    // 订阅「课堂已消失」(教师端停播 / mDNS 记录过期)
+    onLost: (cb: (roomCode: string) => void) => {
+      const listener = (_e: unknown, roomCode: unknown) => cb(String(roomCode));
+      ipcRenderer.on('discovery:lost', listener);
+      return () => ipcRenderer.removeListener('discovery:lost', listener);
+    },
   },
   pointer: {
     // 切换鼠标穿透:interactive=true 捕获鼠标(悬浮组件可交互),false 穿透桌面
