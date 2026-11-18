@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, desktopCapturer } from 'electron';
+import { app, shell, BrowserWindow, ipcMain, screen, session, Tray, Menu, nativeImage, desktopCapturer } from 'electron';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import { writeFile, readFile, appendFile, mkdir } from 'fs/promises';
@@ -11,6 +11,13 @@ import { uIOhook, UiohookMouseEvent } from 'uiohook-napi';
 let mainWindow: BrowserWindow | null = null;
 let localServer: LocalSessionServer | null = null;
 let tray: Tray | null = null;
+
+// 开发态(electron-vite dev)使用独立 userData:
+// 否则开发实例会和已安装版抢同一个单例锁,开发时的设置 / 诊断日志也会污染真实配置。
+// 必须放在 app.requestSingleInstanceLock() 之前:单例锁就是按 userData 目录区分的。
+if (process.env['ELECTRON_RENDERER_URL']) {
+  app.setPath('userData', `${app.getPath('userData')}-dev`);
+}
 
 // 教师端本地设置(持久化到 userData/settings.json)
 interface AppSettings {
@@ -45,7 +52,7 @@ async function loadSettings(): Promise<void> {
   try {
     app.setLoginItemSettings({ openAtLogin: settings.autoLaunch });
   } catch (err) {
-    console.warn('[settings] 设置开机自启失败:', (err as Error)?.message ?? String(err));
+    console.warn('[settings] failed to apply auto-launch:', (err as Error)?.message ?? String(err));
   }
 }
 
@@ -55,14 +62,14 @@ async function saveSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
   try {
     await writeFile(settingsPath(), JSON.stringify(settings, null, 2), 'utf-8');
   } catch (err) {
-    console.warn('[settings] 写盘失败:', (err as Error)?.message ?? String(err));
+    console.warn('[settings] failed to write settings:', (err as Error)?.message ?? String(err));
   }
   // 副作用:开机自启
   if (patch.autoLaunch !== undefined) {
     try {
       app.setLoginItemSettings({ openAtLogin: patch.autoLaunch });
     } catch (err) {
-      console.warn('[settings] 设置开机自启失败:', (err as Error)?.message ?? String(err));
+      console.warn('[settings] failed to apply auto-launch:', (err as Error)?.message ?? String(err));
     }
   }
   return settings;
@@ -74,6 +81,53 @@ function registerSettings(): void {
     return saveSettings(patch);
   });
 }
+
+// 屏幕共享相关(教师端 → 学生端):
+//   1) setDisplayMediaRequestHandler:让渲染层 getDisplayMedia() 直接拿主屏,
+//      不弹系统选择器(老师点「上课/投屏」就开始共享);
+//   2) screen:protect:共享期间给悬浮层开启内容保护(WDA_EXCLUDEFROMCAPTURE),
+//      确保采集到的画面里没有侧边栏/工具栏/画笔面板,也不会和笔迹重影。
+function registerScreenShare(): void {
+  session.defaultSession.setDisplayMediaRequestHandler(
+    async (_request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({
+          types: ['screen'],
+          thumbnailSize: { width: 0, height: 0 },
+        });
+        const primaryId = String(screen.getPrimaryDisplay().id);
+        const primary = sources.find((s) => s.display_id === primaryId) ?? sources[0];
+        if (!primary) {
+          callback({});
+          return;
+        }
+        callback({ video: primary });
+      } catch (err) {
+        console.warn('[screen-share] getDisplayMedia handler failed:', (err as Error)?.message ?? String(err));
+        callback({});
+      }
+    },
+    { useSystemPicker: false },
+  );
+
+  ipcMain.on('screen:protect', (_e, on: boolean) => {
+    try {
+      mainWindow?.setContentProtection(!!on);
+    } catch (err) {
+      console.warn('[screen-share] setContentProtection failed:', (err as Error)?.message ?? String(err));
+    }
+  });
+}
+
+// 应用信息 / 退出(侧边栏「菜单」的「关于 / 退出」)
+function registerAppControl(): void {
+  // 版本号给「关于」面板展示
+  ipcMain.handle('app:get-version', () => app.getVersion());
+  // 渲染层「菜单 → 退出」:与托盘「退出」共用同一个真实退出入口
+  ipcMain.on('app:quit', () => {
+    quitApp();
+  });
+}
 // 是否处于「桌面批注」绘制状态(渲染层切到画笔/板擦等工具时开启)
 let annotationActive = false;
 // 鼠标当前是否悬停在可交互组件(悬浮栏/面板)上。由渲染层 hover 检测经
@@ -83,8 +137,17 @@ let annotationActive = false;
 let pointerInteractive = false;
 // 当前「吞掉 mousedown」的原生状态缓存,避免 mousemove 高频重复调用 setMouseConsume
 let consumeOn = false;
-// 是否真正退出(托盘菜单点击"退出"时置 true,避免 close 拦截)
+// 是否真正退出(托盘「退出」/ 侧边栏「菜单 → 退出」时置 true,避免 close 被拦成托盘常驻)
 let isQuitting = false;
+
+// 统一的「真实退出软件」入口:托盘右键「退出」与渲染层「菜单 → 退出」都走这里。
+// 关键:必须先置 isQuitting —— 否则窗口 close 事件会 preventDefault 变成「最小化到托盘」,
+// app.quit() 永远退不掉。真正的清理(内嵌服务器 / uIOhook)在下面的 will-quit 里。
+function quitApp(): void {
+  if (isQuitting) return;
+  isQuitting = true;
+  app.quit();
+}
 
 // 穿透/点击问题诊断日志(写到 userData/pointer-diag.log)。
 // 只在「状态切换」这类低频时机写一行,正常使用几乎为空;POINTER_DIAG=0 可关闭。
@@ -109,20 +172,7 @@ function getLanIP(): string {
 
 function createWindow(): void {
   // 主窗口 = 全屏透明悬浮层,覆盖桌面,桌面壁纸/图标透出
-  // [debug] 打印所有显示器信息,定位「面板偏右被裁切」的 DPI/多显示器根因
-  const displays = screen.getAllDisplays();
-  for (const d of displays) {
-    console.log('[screen] display:', JSON.stringify({
-      id: d.id,
-      primary: d.id === screen.getPrimaryDisplay().id,
-      bounds: d.bounds,
-      size: d.size,
-      scaleFactor: d.scaleFactor,
-      workArea: d.workArea,
-    }));
-  }
   const { width, height } = screen.getPrimaryDisplay().bounds;
-  console.log('[screen] 主显示器 bounds =', JSON.stringify({ width, height }), 'scaleFactor =', screen.getPrimaryDisplay().scaleFactor);
   mainWindow = new BrowserWindow({
     x: 0,
     y: 0,
@@ -187,11 +237,7 @@ function createWindow(): void {
     reapplyPassthrough();
   });
 
-  // 临时:转发 renderer 的 console 到终端,便于排查白屏
-  mainWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
-    const levels = ['LOG', 'WARN', 'ERROR', 'INFO', 'DEBUG', 'VERBOSE'];
-    console.log(`[renderer:${levels[level] ?? level}] ${message} (${sourceId}:${line})`);
-  });
+  // 渲染进程崩溃时留一条主进程日志(渲染层 console 不再转发到终端,避免刷屏)
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error('[renderer] process gone:', JSON.stringify(details));
   });
@@ -203,6 +249,11 @@ function createWindow(): void {
 
   if (process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL']);
+    // 渲染层 console 默认不再转发到终端(避免开发时刷屏)。需要看时用 C30_DEVTOOLS=1 启动:
+    //   C30_DEVTOOLS=1 pnpm --filter @c30/teacher dev
+    if (process.env.C30_DEVTOOLS === '1') {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+    }
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
   }
@@ -237,8 +288,8 @@ function consumeModeSupported(): boolean {
   const getMode = (uIOhook as unknown as { getConsumeMode?: () => number }).getConsumeMode;
   if (typeof getMode !== 'function') {
     console.error(
-      '[batch] 原生模块没有 getConsumeMode():加载到的是旧 prebuild 或旧编译产物,' +
-        '已禁用「吞 mousedown」(否则按下后光标会卡死)。修复:pnpm rebuild:uiohook',
+      '[batch] native module has no getConsumeMode(): old prebuild/artifact loaded; ' +
+        'mousedown swallowing disabled (otherwise the cursor freezes after pressing). Fix: pnpm rebuild:uiohook',
     );
     consumeModeOk = false;
     return false;
@@ -248,14 +299,14 @@ function consumeModeSupported(): boolean {
     consumeModeOk = mode === CONSUME_MODE_PRESSED_ONLY;
     if (!consumeModeOk) {
       console.error(
-        `[batch] 原生模块 consume-mode=${mode}(期望 ${CONSUME_MODE_PRESSED_ONLY}),` +
-          '不是「只吞 PRESSED」的版本,已禁用「吞 mousedown」。修复:pnpm rebuild:uiohook',
+        `[batch] native consume-mode=${mode} (expected ${CONSUME_MODE_PRESSED_ONLY}); ` +
+          'not a PRESSED-only build, mousedown swallowing disabled. Fix: pnpm rebuild:uiohook',
       );
     } else {
       diag(`consume-mode=${mode}`);
     }
   } catch (err) {
-    console.error('[batch] 读取 consume-mode 失败,已禁用「吞 mousedown」:', (err as Error)?.message ?? String(err));
+    console.error('[batch] failed to read consume-mode, mousedown swallowing disabled:', (err as Error)?.message ?? String(err));
     consumeModeOk = false;
   }
   return consumeModeOk;
@@ -280,7 +331,7 @@ function applyConsume(on: boolean): void {
   try {
     uIOhook.setMouseConsume(on);
   } catch (err) {
-    console.warn('[batch] setMouseConsume 失败:', (err as Error)?.message ?? String(err));
+    console.warn('[batch] setMouseConsume failed:', (err as Error)?.message ?? String(err));
   }
 }
 
@@ -328,7 +379,7 @@ function syncCursorToRenderer(force = false): void {
     lastSyncedCursor = p;
     win.webContents.send('pointer:sync-cursor', p);
   } catch (err) {
-    console.warn('[pointer] 同步鼠标位置失败:', (err as Error)?.message ?? String(err));
+    console.warn('[pointer] failed to sync cursor:', (err as Error)?.message ?? String(err));
   }
 }
 
@@ -352,7 +403,7 @@ function reapplyPassthrough(): void {
     win.setIgnoreMouseEvents(!pointerInteractive, { forward: true });
     diag(`reapply ignore=${!pointerInteractive} visible=${win.isVisible()}`);
   } catch (err) {
-    console.warn('[pointer] 重挂穿透状态失败:', (err as Error)?.message ?? String(err));
+    console.warn('[pointer] failed to re-apply passthrough:', (err as Error)?.message ?? String(err));
   }
   // 立即推一次鼠标位置:让渲染层不等 mousemove 就能纠正穿透状态
   syncCursorToRenderer(true);
@@ -386,10 +437,9 @@ function loadTrayImage(): Electron.NativeImage {
   if (p) {
     const img = nativeImage.createFromPath(p);
     if (!img.isEmpty()) {
-      console.log('[tray] 使用图标:', p);
       return img;
     }
-    console.warn('[tray] 图标文件存在但解码失败:', p);
+    console.warn('[tray] icon file exists but failed to decode:', p);
   }
   // 兜底:生成一个 16x16 纯色图标(至少保证托盘可见、菜单可点)
   const fallback = Buffer.alloc(16 * 16 * 4);
@@ -416,8 +466,7 @@ function createTray(): void {
       }
     } },
     { label: '退出', click: () => {
-      isQuitting = true;
-      app.quit();
+      quitApp();
     } },
   ]);
   tray.setContextMenu(menu);
@@ -459,7 +508,7 @@ function registerGlobalMouseHook(): void {
     // (不装 WH_MOUSE_LL / WH_KEYBOARD_LL / SetWinEventHook / 83ms 前台定时器),
     // 用于判断「视频暂停」是否由 libuiohook 的系统钩子本身导致。
     if (process.env.NO_HOOK === '1') {
-      console.log('[env-check] NO_HOOK=1,跳过 uIOhook.start(),不安装任何系统钩子');
+      console.log('[env-check] NO_HOOK=1: skipping uIOhook.start(), no system hook installed');
       return;
     }
 
@@ -499,7 +548,7 @@ function registerGlobalMouseHook(): void {
     });
     uIOhook.start();
   } catch (err) {
-    console.warn('[batch] 全局鼠标钩子启动失败(画笔将以窗口捕获方式降级):', (err as Error)?.message ?? String(err));
+    console.warn('[batch] global mouse hook failed to start (drawing falls back to window capture):', (err as Error)?.message ?? String(err));
   }
 }
 
@@ -532,7 +581,7 @@ function registerWhiteboardControl(): void {
         mainWindow.setAlwaysOnTop(true, 'floating');
       }
     } catch (err) {
-      console.warn('[whiteboard] 切换层级失败:', (err as Error)?.message ?? String(err));
+      console.warn('[whiteboard] failed to switch window level:', (err as Error)?.message ?? String(err));
     }
   });
 }
@@ -574,7 +623,7 @@ async function captureScreenRect(rect: SpotlightRect): Promise<string | null> {
     });
     return crop.toDataURL();
   } catch (err) {
-    console.warn('[spotlight] 截屏失败:', (err as Error)?.message ?? String(err));
+    console.warn('[spotlight] screen capture failed:', (err as Error)?.message ?? String(err));
     return null;
   }
 }
@@ -625,9 +674,9 @@ interface WinItem {
   minimized?: boolean; // 是否最小化(任务栏替代需一并展示最小化窗口)
 }
 
-// 枚举系统所有顶层窗口(含最小化窗口)。desktopCapturer 只返回「可捕获画面」的可见窗口,
+// 枚举「任务栏上会出现的窗口」(含最小化窗口)。desktopCapturer 只返回「可捕获画面」的可见窗口,
 // 最小化窗口会被漏掉,无法充当任务栏;这里改用 user32 EnumWindows(经 PowerShell P/Invoke),
-// 与「聚焦/回到桌面」保持一致,从而拿到完整的任务栏级窗口列表。
+// 并按 Windows 任务栏的显示规则过滤,只留下老师真正会在任务栏里看到的那些窗口。
 interface NativeWindow {
   hwnd: number;
   title: string;
@@ -636,7 +685,11 @@ interface NativeWindow {
 
 function enumerateAllWindows(): Promise<NativeWindow[]> {
   return new Promise((resolve) => {
+    // 关键:必须让 PowerShell 用 UTF-8 往 stdout 写字。
+    // powershell.exe 默认按控制台输出代码页(中文系统是 GBK/936)写管道,Node 端却按 UTF-8 解码,
+    // 于是所有中文窗口标题都会变成「乱码」("C30 教师端" → "C30 ��ʦ��")。
     const ps = `
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 Add-Type @"
 using System;
 using System.Text;
@@ -648,16 +701,43 @@ public class WinList {
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out int val, int size);
 }
 "@
+$WS_EX_TOOLWINDOW = 0x00000080
+$WS_EX_APPWINDOW  = 0x00040000
+$GW_OWNER = 4
+# 桌面/任务栏本身、UWP 内容窗口(和它的 ApplicationFrameWindow 外壳重复)不显示在任务栏
+$SKIP_CLASSES = @('Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd', 'Windows.UI.Core.CoreWindow')
 $items = New-Object System.Collections.Generic.List[object]
+$sb = New-Object System.Text.StringBuilder 512
+$cn = New-Object System.Text.StringBuilder 256
 $cb = [WinList+EnumWindowsProc]{
   param($h, $l)
   # 只保留可见顶层窗口(最小化窗口 IsWindowVisible 仍为 true,不会被漏掉)
   if (-not [WinList]::IsWindowVisible($h)) { return $true }
+  # ---- 任务栏规则 ----
+  # 工具窗口(WS_EX_TOOLWINDOW)、有 owner 的辅助窗口、被 DWM cloak 的窗口(不在当前虚拟桌面 /
+  # 已挂起的 UWP)都不会出现在任务栏。WS_EX_APPWINDOW 是应用主动要求上任务栏,优先级最高。
+  $ex = [WinList]::GetWindowLong($h, -20)
+  $appWin = (($ex -band $WS_EX_APPWINDOW) -ne 0)
+  if (-not $appWin) {
+    if (($ex -band $WS_EX_TOOLWINDOW) -ne 0) { return $true }
+    if ([WinList]::GetWindow($h, $GW_OWNER) -ne [IntPtr]::Zero) { return $true }
+  }
+  $cloaked = 0
+  try { [void][WinList]::DwmGetWindowAttribute($h, 14, [ref]$cloaked, 4) } catch { }
+  if ($cloaked -ne 0) { return $true }
+  [void]$cn.Clear()
+  [void][WinList]::GetClassName($h, $cn, 256)
+  if ($SKIP_CLASSES -contains $cn.ToString()) { return $true }
+  # ---- 标题(空标题的窗口任务栏也不会给按钮)----
   $len = [WinList]::GetWindowTextLength($h)
   if ($len -le 0) { return $true }
-  $sb = New-Object System.Text.StringBuilder ($len + 1)
+  [void]$sb.Clear()
   [void][WinList]::GetWindowText($h, $sb, $len + 1)
   $title = $sb.ToString()
   if ([string]::IsNullOrWhiteSpace($title)) { return $true }
@@ -673,7 +753,7 @@ $items | ConvertTo-Json -Compress
       { windowsHide: true, timeout: 8000 },
       (err, stdout) => {
         if (err) {
-          console.warn('[windows] EnumWindows 枚举失败:', (err as Error)?.message ?? String(err));
+          console.warn('[windows] EnumWindows failed:', (err as Error)?.message ?? String(err));
           resolve([]);
           return;
         }
@@ -695,7 +775,7 @@ $items | ConvertTo-Json -Compress
           }
           resolve(result);
         } catch (e) {
-          console.warn('[windows] 解析窗口列表失败:', (e as Error)?.message ?? String(e), 'raw =', raw.slice(0, 200));
+          console.warn('[windows] failed to parse window list:', (e as Error)?.message ?? String(e), 'raw =', raw.slice(0, 200));
           resolve([]);
         }
       },
@@ -703,10 +783,10 @@ $items | ConvertTo-Json -Compress
   });
 }
 
-// 生成「窗口」面板列表:完整枚举(含最小化) + desktopCapturer 缩略图(仅可见窗口有)。
+// 生成「窗口」面板列表:任务栏级枚举(含最小化) + desktopCapturer 缩略图(仅可见窗口有)。
 async function listSystemWindows(): Promise<WinItem[]> {
   try {
-    // 1) 枚举所有顶层窗口(含最小化),按 Z 序排列,最小化窗口靠后但不会消失
+    // 1) 按任务栏规则枚举窗口(含最小化),按 Z 序排列,最小化窗口靠后但不会消失
     const all = await enumerateAllWindows();
 
     // 2) desktopCapturer 仅用于补可见窗口的缩略图(按 HWND 匹配),最小化窗口无缩略图由前端占位
@@ -745,20 +825,21 @@ async function listSystemWindows(): Promise<WinItem[]> {
         minimized: w.minimized,
       });
     }
-    console.log('[windows] 枚举', all.length, '个顶层窗口 → 输出', result.length, '个(其中最小化', result.filter((r) => r.minimized).length, '个)');
     return result;
   } catch (err) {
-    console.warn('[windows] 枚举窗口失败:', (err as Error)?.message ?? String(err));
+    console.warn('[windows] failed to enumerate windows:', (err as Error)?.message ?? String(err));
     return [];
   }
 }
 
-// 将指定 HWND 窗口提到前台(最小化则先还原)。走 PowerShell 调 user32,避免引入原生模块。
-function activateWindow(hwnd: number): Promise<{ ok: boolean }> {
+// 把指定 HWND 窗口「最大化并置前」(最小化则先还原)。走 PowerShell 调 user32,避免引入原生模块。
+// 「窗口」面板点击某一条 = 把这个窗口最大化到桌面;其他窗口一律不动(不最小化、不改尺寸)。
+//   · SW_RESTORE(9)   先还原最小化窗口,否则直接 SW_MAXIMIZE 看不到内容;
+//   · SW_MAXIMIZE(3)  最大化(比"提到前台"更贴合老师点开窗口就想全屏讲的用法);
+//   · keybd_event(Alt) 模拟一次 Alt 抬起:本应用悬浮窗 focusable:false 永不成为前台窗口,
+//                     直接 SetForegroundWindow 会被 Windows 前台锁拒绝,故先骗一次前台权限。
+function maximizeWindow(hwnd: number): Promise<{ ok: boolean }> {
   return new Promise((resolve) => {
-    // 先还原最小化窗口(SW_RESTORE=9),再 BringWindowToTop + SetForegroundWindow。
-    // 悬浮窗 focusable:false 永不抢占前台,导致本进程非前台,SetForegroundWindow 会被
-    // Windows 前台锁拒绝;故先模拟一次 Alt 键抬起(欺骗系统授予前台权限),再置前。
     const ps = `
 Add-Type @"
 using System;
@@ -767,83 +848,34 @@ public class Win {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 }
 "@
 $h = [IntPtr]${hwnd}
-if ([Win]::IsIconic($h)) { [Win]::ShowWindow($h, 9) | Out-Null }
-# 模拟按下+抬起 Alt 键,授予本进程设置前台权限(绕过前台锁)
+# 已失效的句柄(窗口刚好被关掉)直接退出,避免对 0 号句柄乱操作
+if ($h -eq [IntPtr]::Zero) { exit 1 }
+if ([Win]::IsIconic($h)) { [void][Win]::ShowWindow($h, 9) }       # 先还原
+if (-not [Win]::IsZoomed($h)) { [void][Win]::ShowWindow($h, 3) }  # 再最大化
 [Win]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
 [Win]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-[Win]::BringWindowToTop($h) | Out-Null
-[Win]::SetForegroundWindow($h) | Out-Null
+[void][Win]::BringWindowToTop($h)
+[void][Win]::SetForegroundWindow($h)
 `;
     execFile(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
       { windowsHide: true, timeout: 8000 },
-      (err) => resolve({ ok: !err }),
-    );
-  });
-}
-
-// 聚焦单窗口:最小化除目标窗口外的所有可见顶层窗口,只保留目标窗口在桌面展示,
-// 并将目标窗口还原+提到前台。用于「窗口」面板点击某条目后「只看这一个,其余缩小」。
-// selfHwnd = 本应用悬浮窗句柄(必须跳过,否则悬浮层自身也被最小化,交互失效)。
-function focusWindow(hwnd: number, selfHwnd: number): Promise<{ ok: boolean; minimized: number }> {
-  return new Promise((resolve) => {
-    const ps = `
-Add-Type @"
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public class WinEnum {
-  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int max);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-}
-"@
-$target = [IntPtr]${hwnd}
-$self = [IntPtr]${selfHwnd}
-$minimized = 0
-$sb = New-Object System.Text.StringBuilder 256
-$callback = [WinEnum+EnumWindowsProc]{
-  param($h, $l)
-  if ($h -eq $target -or $h -eq $self) { return $true }
-  if (-not [WinEnum]::IsWindowVisible($h)) { return $true }
-  if ([WinEnum]::IsIconic($h)) { return $true }
-  [void]$sb.Clear()
-  [void][WinEnum]::GetWindowText($h, $sb, 256)
-  $title = $sb.ToString()
-  # 跳过无标题的系统工具窗口(如程序管理器 Progman、任务栏 Shell_TrayWnd 等)
-  if ([string]::IsNullOrWhiteSpace($title)) { return $true }
-  [void][WinEnum]::ShowWindow($h, 6)  # SW_MINIMIZE
-  $script:minimized++
-  return $true
-}
-[void][WinEnum]::EnumWindows($callback, [IntPtr]::Zero)
-# 还原目标窗口(若最小化)并置前
-if ([WinEnum]::IsIconic($target)) { [void][WinEnum]::ShowWindow($target, 9) }
-[WinEnum]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-[WinEnum]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-[void][WinEnum]::BringWindowToTop($target)
-[void][WinEnum]::SetForegroundWindow($target)
-Write-Output $minimized
-`;
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
-      { windowsHide: true, timeout: 10000 },
-      (err, stdout) => {
-        const minimized = parseInt((stdout || '').trim(), 10) || 0;
-        resolve({ ok: !err, minimized });
+      (err, stdout, stderr) => {
+        if (err) {
+          console.warn(
+            '[windows] failed to maximize window:',
+            (err as Error)?.message ?? String(err),
+            String(stderr || '').trim().slice(0, 200),
+          );
+        }
+        resolve({ ok: !err });
       },
     );
   });
@@ -906,14 +938,11 @@ function registerWindowList(): void {
   ipcMain.handle('windows:list', async () => {
     return listSystemWindows();
   });
-  ipcMain.handle('windows:activate', async (_e, hwnd: number) => {
-    return activateWindow(hwnd);
+  // 点开某个窗口 = 把它最大化到桌面(其余窗口保持原样)
+  ipcMain.handle('windows:maximize', async (_e, hwnd: number) => {
+    return maximizeWindow(hwnd);
   });
-  // 聚焦单窗口:最小化其他窗口,只保留目标窗口
-  ipcMain.handle('windows:focus', async (_e, hwnd: number) => {
-    return focusWindow(hwnd, getSelfHwnd());
-  });
-  // 回到桌面:最小化所有窗口
+  // 回到电脑桌面 = 最小化所有窗口,桌面上只剩壁纸/图标
   ipcMain.handle('windows:showDesktop', async () => {
     return showDesktop(getSelfHwnd());
   });
@@ -947,12 +976,12 @@ function registerLocalSessionServer(): void {
     .start()
     .then((port) => {
       const host = getLanIP();
-      console.log(`[local-session] 内嵌课堂服务器已启动: ${host}:${port}`);
+      console.log(`[local-session] classroom server listening on ${host}:${port}`);
       // 向 renderer 暴露端口(供连接提示)
       ipcMain.handle('session:local-endpoint', () => ({ host, port }));
     })
     .catch((err) => {
-      console.warn('[local-session] 内嵌服务器启动失败(将仅依赖中心服务器):', (err as Error)?.message ?? String(err));
+      console.warn('[local-session] failed to start embedded server:', (err as Error)?.message ?? String(err));
     });
 }
 
@@ -960,35 +989,50 @@ function registerLocalSessionServer(): void {
 ipcMain.handle('session:publish', async (_e, info: { roomCode: string; teacherName: string; host: string; port: number }) => {
   try {
     await mdsd.publish(info);
+    console.log(`[local-session] classroom published room=${info.roomCode} @ ${info.host}:${info.port}`);
     return { ok: true };
   } catch (err) {
-    console.warn('[local-session] mDNS 广播失败:', (err as Error)?.message ?? String(err));
+    console.warn('[local-session] mDNS publish failed:', (err as Error)?.message ?? String(err));
     return { ok: false };
   }
 });
 
-app.whenReady().then(async () => {
-  // 打印实验开关 env 状态,便于确认环境变量是否真正生效(避免口头确认失效)
-  console.log('[env-check] NO_CONSUME =', JSON.stringify(process.env.NO_CONSUME ?? '(未设置)'));
-  console.log('[env-check] NO_FORWARD =', JSON.stringify(process.env.NO_FORWARD ?? '(未设置)'));
-  diag(`startup userData=${app.getPath('userData')}`);
-  await loadSettings();
-  registerWindowControls();
-  registerLocalSessionServer();
-  registerPointerControl();
-  registerAnnotationControl();
-  registerWhiteboardControl();
-  registerSpotlightControl();
-  registerWindowList();
-  registerSettings();
-  registerGlobalMouseHook();
-  createTray();
-  createWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// 单例锁:整机只允许一个教师端实例。它是常驻托盘的透明悬浮层,多开会叠出多个托盘 /
+// 浮层,穿透与全局鼠标钩子也会互相打架。
+//   · 拿不到锁 = 本次是「第二次启动」:通知已有实例把浮层叫出来,然后本进程直接退出;
+//   · 已有实例在 second-instance 里只做「显示已有窗口」,不重建窗口 / 不重启服务。
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.showInactive();
+    diag('second-instance → show overlay');
   });
-});
+
+  app.whenReady().then(async () => {
+    diag(`startup userData=${app.getPath('userData')}`);
+    await loadSettings();
+    registerWindowControls();
+    registerLocalSessionServer();
+    registerPointerControl();
+    registerAnnotationControl();
+    registerWhiteboardControl();
+    registerSpotlightControl();
+    registerWindowList();
+    registerScreenShare();
+    registerSettings();
+    registerAppControl();
+    registerGlobalMouseHook();
+    createTray();
+    createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 // 窗口全关时不退出(常驻托盘),除非真正退出
 app.on('window-all-closed', () => {

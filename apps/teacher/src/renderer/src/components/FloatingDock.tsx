@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import type { User } from '@c30/shared';
+import type { SessionMember, User } from '@c30/shared';
 import {
-  GraduationCap,
   Presentation,
   Menu,
   Monitor,
@@ -15,6 +14,9 @@ import {
   Eraser,
   MessageSquareText,
   Focus,
+  Settings,
+  Info,
+  Power,
   ChevronRight,
   ChevronLeft,
   ChevronUp,
@@ -30,6 +32,8 @@ import useOverlayScale, { scaled } from '../hooks/useOverlayScale';
 import PenPanel, { type PenConfig } from './PenPanel';
 import EraserPanel from './EraserPanel';
 import ColorWheel from './ColorWheel';
+import InteractPanel from './InteractPanel';
+import type { InteractController } from '../hooks/useInteract';
 
 // C30 风格的桌面悬浮黑色组件:竖排导航(可左右贴边) + 右上角状态 + 底部工具条。
 // 竖条左右两侧各有一个折叠箭头(对应同一个组件),老师站在教室任一侧都能点开。
@@ -41,32 +45,51 @@ interface NavItem {
   Icon: LucideIcon;
 }
 
-// 发送端(教师端)导航:白板 + 上课 + 窗口(其余移除)
+// 发送端(教师端)导航:白板 + 窗口(其余移除)
+// 「上课/下课」不再走导航切换,而是头像下方的独立矩形按钮(上课中点一次即下课并计时)
 // 「窗口」点击后弹出面板:顶部「回到电脑桌面」按钮 + 窗口列表(C30 对齐)
 const TEACHER_NAV: NavItem[] = [
   { key: 'whiteboard', label: '白板', Icon: Presentation },
-  { key: 'class', label: '上课', Icon: GraduationCap },
   { key: 'windows', label: '窗口', Icon: LayoutGrid },
 ];
 
+// 上课计时:秒 → mm:ss(允许分钟超过 99,不截断,课堂再长也不会回绕)
+function formatClassElapsed(totalSec: number): string {
+  const sec = Math.max(0, Math.floor(totalSec));
+  const mm = Math.floor(sec / 60);
+  const ss = sec % 60;
+  return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+}
+
 // 接收端(学生端)导航:极简,仅状态展示
 const STUDENT_NAV: NavItem[] = [{ key: 'whiteboard', label: '画面', Icon: Presentation }];
+
+type DockMenuKey = 'settings' | 'about' | 'exit';
+// 侧边栏「菜单」的第一层弹出菜单:设置 / 关于 / 退出。
+// 交互约定:点侧边栏「菜单」(或头像)只弹这一层小浮层;点「设置」才打开居中的系统设置面板,
+// 「关于」展示版本信息,「退出」二次确认后退出应用。
+const DOCK_MENU_ITEMS: { key: DockMenuKey; label: string; Icon: LucideIcon; danger?: boolean }[] = [
+  { key: 'settings', label: '设置', Icon: Settings },
+  { key: 'about', label: '关于', Icon: Info },
+  { key: 'exit', label: '退出', Icon: Power, danger: true },
+];
 
 interface ToolItem {
   key: string;
   label: string;
   Icon: LucideIcon;
-  /** 该工具是否有「更多」调整菜单(有则按钮右上角显示展开角标) */
-  menu?: 'pen' | 'eraser';
+  /** 该工具是否有「更多」菜单(有则按钮右上角显示展开角标) */
+  menu?: 'pen' | 'eraser' | 'interact';
 }
 
 // 底部工具栏:选择/画笔/板擦/互动/聚焦。
 // 交互约定:第一次点击 = 切换到该功能;再次点击已激活且带菜单的工具 = 展开/收起调整菜单。
+// 「互动」不是绘制工具而是一块面板:点一下直接展开/收起互动面板,不改变当前画笔。
 const TOOLBAR: ToolItem[] = [
   { key: 'select', label: '选择', Icon: MousePointer2 },
   { key: 'pen', label: '画笔', Icon: Pen, menu: 'pen' },
   { key: 'eraser', label: '板擦', Icon: Eraser, menu: 'eraser' },
-  { key: 'interact', label: '互动', Icon: MessageSquareText },
+  { key: 'interact', label: '互动', Icon: MessageSquareText, menu: 'interact' },
   { key: 'focus', label: '聚焦', Icon: Focus },
 ];
 
@@ -74,6 +97,8 @@ export default function FloatingDock({
   role,
   active,
   onChange,
+  classStartedAt,
+  onToggleClass,
   user,
   onLogout,
   memberCount,
@@ -84,6 +109,10 @@ export default function FloatingDock({
   role: 'TEACHER' | 'STUDENT';
   active: string;
   onChange: (key: string) => void;
+  /** 本次上课开始时间戳;null = 未上课。状态由 TeacherWorkspace 持有(需同步服务端) */
+  classStartedAt: number | null;
+  /** 点「上课/下课」:由 TeacherWorkspace 更新状态并广播 class.start / class.end */
+  onToggleClass: () => void;
   user: User;
   onLogout: () => void;
   memberCount: number;
@@ -94,12 +123,35 @@ export default function FloatingDock({
   const s = useOverlayScale();
   const px = (n: number) => scaled(n, s);
 
+  // 侧边栏「菜单」的第一层浮层(设置/关于/退出)是否展开
   const [menuOpen, setMenuOpen] = useState(false);
+  // 系统设置面板(菜单 → 设置)是否展开:仍然是原来的屏幕居中面板
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 「关于」面板 / 「退出」二次确认
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [quitConfirmOpen, setQuitConfirmOpen] = useState(false);
+  // 应用版本(关于面板里展示,由主进程 app.getVersion() 提供)
+  const [appVersion, setAppVersion] = useState('');
+  // 菜单锚点:头像(顶部)或「菜单」按钮(底部),浮层跟着点开的按钮走
+  const [menuAnchor, setMenuAnchor] = useState<'avatar' | 'menu'>('menu');
+  const avatarBtnRef = useRef<HTMLButtonElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const menuPanelRef = useRef<HTMLDivElement>(null);
+  const [menuPanelPos, setMenuPanelPos] = useState<{ left: number; top: number } | null>(null);
+  // 上课计时:startedAt 由父组件(TeacherWorkspace)持有并同步服务端;
+  // 这里只负责按秒刷新显示。侧边栏收起/换边都不会卸载本组件,所以计时不会中断。
+  // 计时刷新用「当前时间」:只在课堂上按秒推进,未上课时不产生定时器
+  const [clockNow, setClockNow] = useState(() => Date.now());
   // 窗口面板(点击「窗口」导航项打开):顶部「回到电脑桌面」+ 系统真实窗口列表(代替任务栏)
   const [windowsOpen, setWindowsOpen] = useState(false);
   // 系统窗口列表(标题 + 缩略图 + 句柄)
   const [winList, setWinList] = useState<{ id: string; hwnd: number; title: string; thumbnail: string; minimized?: boolean }[]>([]);
   const [winLoading, setWinLoading] = useState(false);
+  // 窗口面板位置:必须「贴着侧边栏」出现(左栏 → 右邻、右栏 → 左邻),
+  // 顶端与侧边栏对齐并夹在屏幕内;不能用「屏幕对侧 + 垂直居中」,那样离侧边栏很远,
+  // 老师点完还要满屏找面板。位置由 useLayoutEffect 量出来,拖动侧边栏时实时跟随。
+  const winPanelRef = useRef<HTMLDivElement>(null);
+  const [winPanelPos, setWinPanelPos] = useState<{ left: number; top: number } | null>(null);
   // 左侧/右侧浮层各自独立:
   //   · openSide = null 表示两侧都收起(允许);同时最多只展开一侧。
   //   · sideY 记录两侧各自的垂直位置(视觉 top,px;null = 垂直居中),
@@ -110,6 +162,26 @@ export default function FloatingDock({
   const rightDockRef = useRef<HTMLDivElement>(null);
 
   const navItems = role === 'TEACHER' ? TEACHER_NAV : STUDENT_NAV;
+
+  // 上课计时:上课中每秒刷新「当前时间」;下课立即停表(计时归零,下次上课重新开始)
+  useEffect(() => {
+    if (classStartedAt == null) return;
+    setClockNow(Date.now());
+    const sync = () => setClockNow(Date.now());
+    const timer = window.setInterval(sync, 1000);
+    // 窗口被最小化/隐藏时定时器会被节流:回到前台立即补一次,避免计时停顿一秒以上
+    window.addEventListener('focus', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', sync);
+      document.removeEventListener('visibilitychange', sync);
+    };
+  }, [classStartedAt]);
+
+  const inClass = classStartedAt != null;
+  // 已经上课多久(秒 → mm:ss)
+  const classElapsedText = classStartedAt == null ? '' : formatClassElapsed((clockNow - classStartedAt) / 1000);
 
   // 把某一侧的 top 夹在屏幕内(用该侧自身实际高度,不读另一侧)
   const setSideYClamped = useCallback((side: 'left' | 'right', top: number, el: HTMLElement | null) => {
@@ -143,6 +215,126 @@ export default function FloatingDock({
   useEffect(() => {
     if (windowsOpen) refreshWindows();
   }, [windowsOpen, refreshWindows]);
+
+  // 侧边栏收起(或换边)时,窗口面板也跟着收起:面板是侧边栏的「飞出层」,没有锚点就不该留在屏幕上。
+  useEffect(() => {
+    if (!openSide) setWindowsOpen(false);
+  }, [openSide]);
+
+  // 窗口面板定位:贴在侧边栏旁边,顶端与侧边栏对齐,四边夹进屏幕。
+  // 依赖 sideY(拖动侧边栏)/ openSide(换边)/ s(缩放)/ winList.length(列表加载后高度变化)。
+  useLayoutEffect(() => {
+    if (!windowsOpen) {
+      setWinPanelPos(null);
+      return;
+    }
+    const dockEl = openSide === 'left' ? leftDockRef.current : openSide === 'right' ? rightDockRef.current : null;
+    const update = () => {
+      const gap = px(12);
+      const margin = px(12);
+      const el = winPanelRef.current;
+      const panelW = el?.offsetWidth || px(380);
+      const panelH = el?.offsetHeight || px(460);
+      const dockRect = dockEl?.getBoundingClientRect() ?? null;
+      // 水平:左栏放在栏右侧,右栏放在栏左侧(空间不够时由夹取兜底)
+      let left: number;
+      if (dockRect) {
+        left = openSide === 'left' ? dockRect.right + gap : dockRect.left - panelW - gap;
+      } else {
+        left = margin;
+      }
+      left = Math.max(margin, Math.min(left, window.innerWidth - panelW - margin));
+      // 垂直:与侧边栏顶端对齐(侧边栏是垂直居中时可读成居中),再夹进屏幕
+      const anchorTop = dockRect ? dockRect.top : (window.innerHeight - panelH) / 2;
+      const top = Math.max(margin, Math.min(anchorTop, window.innerHeight - panelH - margin));
+      setWinPanelPos((prev) =>
+        prev && Math.abs(prev.left - left) < 0.5 && Math.abs(prev.top - top) < 0.5 ? prev : { left, top },
+      );
+    };
+    update();
+    // 列表加载/缩略图撑高后高度会变,监听面板自身尺寸再校一次
+    const ro = new ResizeObserver(update);
+    if (winPanelRef.current) ro.observe(winPanelRef.current);
+    window.addEventListener('resize', update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [windowsOpen, openSide, sideY, s, winList.length]);
+
+  // 侧边栏收起/换边时,「菜单」浮层也跟着收起:没有锚点就不该留在屏幕上
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [openSide]);
+
+  // 打开「关于」时读取应用版本(失败保持空,面板显示「—」)
+  useEffect(() => {
+    if (!aboutOpen) return;
+    (window as any).api?.app
+      ?.version?.()
+      .then((v: string) => setAppVersion(v || ''))
+      .catch(() => {});
+  }, [aboutOpen]);
+
+  // 「菜单」浮层定位:紧贴侧边栏、底边与点开的按钮对齐,四边夹进屏幕。
+  // 依赖 sideY(拖动侧边栏)/ openSide(换边)/ s(缩放)/ menuAnchor(头像 or 菜单按钮)。
+  useLayoutEffect(() => {
+    if (!menuOpen) {
+      setMenuPanelPos(null);
+      return;
+    }
+    const update = () => {
+      const anchorEl = menuAnchor === 'avatar' ? avatarBtnRef.current : menuBtnRef.current;
+      const panelEl = menuPanelRef.current;
+      if (!anchorEl) return;
+      const anchor = anchorEl.getBoundingClientRect();
+      const dockRect =
+        (openSide === 'left' ? leftDockRef.current : openSide === 'right' ? rightDockRef.current : null)?.getBoundingClientRect() ??
+        null;
+      const panelW = panelEl?.offsetWidth || px(212);
+      const panelH = panelEl?.offsetHeight || px(240);
+      const gap = px(12);
+      const margin = px(12);
+      // 水平:贴着侧边栏外沿留 12px(左栏 → 浮层在栏右侧;右栏 → 浮层在栏左侧)
+      let left: number;
+      if (dockRect) left = openSide === 'left' ? dockRect.right + gap : dockRect.left - panelW - gap;
+      else left = openSide === 'left' ? anchor.right + gap : anchor.left - panelW - gap;
+      left = Math.max(margin, Math.min(left, window.innerWidth - panelW - margin));
+      // 垂直:浮层底边与点开的按钮底边对齐,再夹进屏幕
+      let top = anchor.bottom - panelH;
+      top = Math.max(margin, Math.min(top, window.innerHeight - panelH - margin));
+      setMenuPanelPos((prev) =>
+        prev && Math.abs(prev.left - left) < 0.5 && Math.abs(prev.top - top) < 0.5 ? prev : { left, top },
+      );
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    if (menuPanelRef.current) ro.observe(menuPanelRef.current);
+    window.addEventListener('resize', update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [menuOpen, menuAnchor, openSide, sideY, s]);
+
+  // 退出应用:优先走主进程 app:quit(真正退出,而不是「关闭窗口 = 最小化到托盘」);
+  // 非 Electron 预览环境没有该 API 时,退回旧行为。
+  const quitApp = () => {
+    const appApi = (window as any).api?.app;
+    if (appApi?.quit) {
+      appApi.quit();
+      return;
+    }
+    onLogout();
+  };
+
+  // 第一层菜单的点击:关掉浮层,再打开各自的下一层
+  const handleMenuAction = (key: DockMenuKey) => {
+    setMenuOpen(false);
+    if (key === 'settings') setSettingsOpen(true);
+    else if (key === 'about') setAboutOpen(true);
+    else setQuitConfirmOpen(true);
+  };
 
   // 某一侧的定位样式:有自定义 top 就用 px,否则垂直居中
   const verticalStyle = (side: 'left' | 'right'): React.CSSProperties => {
@@ -279,8 +471,17 @@ export default function FloatingDock({
         {/* 头像 + 名称 */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: px(5) }}>
           <button
-            onClick={() => setMenuOpen((v) => !v)}
-            title={`${user.name} · 设置`}
+            ref={avatarBtnRef}
+            onClick={() => {
+              // 头像和底部「菜单」一样:先弹第一层菜单,不直接开设置面板
+              setMenuAnchor('avatar');
+              // 保证同时只有一层浮层:开菜单时收起设置/关于/窗口
+              setSettingsOpen(false);
+              setAboutOpen(false);
+              setWindowsOpen(false);
+              setMenuOpen((v) => !v);
+            }}
+            title={`${user.name} · 菜单`}
             style={{
               width: px(50),
               height: px(50),
@@ -314,6 +515,57 @@ export default function FloatingDock({
           </span>
         </div>
 
+        {/* 上课/下课:头像名称下方的矩形圆角按钮。
+            未上课 = 蓝色「上课」;点击后变红色「下课」,并在按钮内显示已上课时长 mm:ss。
+            再点一次即下课(计时清零,下次上课重新计时)。 */}
+        {role === 'TEACHER' && (
+          <button
+            onClick={onToggleClass}
+            title={inClass ? `下课(已上课 ${classElapsedText})` : '上课'}
+            aria-pressed={inClass}
+            style={{
+              marginTop: px(12),
+              width: px(66),
+              height: px(42),
+              borderRadius: px(10),
+              border: 'none',
+              cursor: 'pointer',
+              background: inClass ? '#dc2626' : '#2563eb',
+              color: '#ffffff',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: px(3),
+              boxShadow: inClass
+                ? '0 6px 16px rgba(220,38,38,0.40), 0 0 0 2px rgba(248,113,113,0.22)'
+                : '0 6px 16px rgba(37,99,235,0.40), 0 0 0 2px rgba(96,165,250,0.22)',
+              transition: 'background .16s ease, box-shadow .16s ease',
+              outline: 'none',
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = inClass ? '#ef4444' : '#3b82f6';
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = inClass ? '#dc2626' : '#2563eb';
+            }}
+          >
+            <span style={{ fontSize: px(13), fontWeight: 600, lineHeight: 1 }}>{inClass ? '下课' : '上课'}</span>
+            {inClass && (
+              <span
+                style={{
+                  fontSize: px(11),
+                  lineHeight: 1,
+                  opacity: 0.92,
+                  fontVariantNumeric: 'tabular-nums',
+                }}
+              >
+                {classElapsedText}
+              </span>
+            )}
+          </button>
+        )}
+
         {/* 导航项 */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: px(10), marginTop: px(16) }}>
           {navItems.map((item) => {
@@ -322,8 +574,13 @@ export default function FloatingDock({
             return (
               <button
                 key={item.key}
-                // 「窗口」项点击打开窗口面板(而非切换视图);其余项触发 onChange
-                onClick={() => (item.key === 'windows' ? setWindowsOpen((v) => !v) : onChange(item.key))}
+                // 「窗口」项点击打开窗口面板(而非切换视图);其余项触发 onChange。
+                // 任一导航项都先收起「菜单」浮层,避免两层浮层叠在一起。
+                onClick={() => {
+                  setMenuOpen(false);
+                  if (item.key === 'windows') setWindowsOpen((v) => !v);
+                  else onChange(item.key);
+                }}
                 title={item.label}
                 style={{
                   width: px(60),
@@ -358,19 +615,27 @@ export default function FloatingDock({
           })}
         </div>
 
-        {/* 底部:菜单(点击打开设置窗口) */}
+        {/* 底部:菜单(点击先弹第一层浮层:设置/关于/退出) */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: px(8), marginTop: 'auto' }}>
           <button
+            ref={menuBtnRef}
             title="菜单"
-            onClick={() => setMenuOpen((v) => !v)}
+            onClick={() => {
+              setMenuAnchor('menu');
+              // 保证同时只有一层浮层:开菜单时收起设置/关于/窗口
+              setSettingsOpen(false);
+              setAboutOpen(false);
+              setWindowsOpen(false);
+              setMenuOpen((v) => !v);
+            }}
             style={{
               width: px(60),
               height: px(60),
               borderRadius: px(14),
               border: 'none',
               cursor: 'pointer',
-              background: 'transparent',
-              color: '#9ca3af',
+              background: menuOpen ? 'rgba(255,255,255,0.10)' : 'transparent',
+              color: menuOpen ? '#ffffff' : '#9ca3af',
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
@@ -387,9 +652,247 @@ export default function FloatingDock({
       </div>
       )}
 
-      {/* 系统设置窗口(菜单点击打开):开机自启 / 展示教室信息 / 允许互动 */}
-      {/* 注意:面板必须在侧边栏容器之外渲染,否则侧边栏的 transform 会使 fixed 定位失效 */}
+      {/* 第一层浮层:点侧边栏「菜单」(或头像)后,在侧边栏旁边弹出 设置 / 关于 / 退出。
+          点「设置」才打开屏幕中间的系统设置面板(原来的那一层);点浮层外任意位置收起。 */}
       {menuOpen && (
+        <>
+          {/* 全屏透明遮罩:只负责「点外面收起」,不改变视觉 */}
+          <div
+            data-interactive
+            style={{
+              position: 'fixed',
+              inset: 0,
+              zIndex: 115,
+              background: 'transparent',
+              pointerEvents: 'auto',
+            }}
+            onClick={() => setMenuOpen(false)}
+          />
+          <div
+            ref={menuPanelRef}
+            data-interactive
+            data-overlay-anim
+            style={{
+              position: 'fixed',
+              left: menuPanelPos?.left ?? px(12),
+              top: menuPanelPos?.top ?? px(12),
+              // 第一帧还没量到位置时先隐藏,避免闪到错误位置
+              visibility: menuPanelPos ? 'visible' : 'hidden',
+              width: px(212),
+              background: '#26262b',
+              borderRadius: px(12),
+              border: '1px solid #3a3a40',
+              padding: px(6),
+              zIndex: 116,
+              boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
+              pointerEvents: 'auto',
+              userSelect: 'none',
+              // 浮层在侧边栏哪一侧,就从哪一侧滑入
+              ...overlayIn(openSide === 'left' ? 'left' : 'right'),
+            }}
+          >
+            {/* 用户信息:保留菜单里的身份上下文 */}
+            <div
+              style={{
+                padding: `${px(8)}px ${px(10)}px ${px(10)}px`,
+                borderBottom: '1px solid #3a3a40',
+              }}
+            >
+              <div style={{ fontSize: px(15), fontWeight: 600, color: '#ffffff' }}>{user.name}</div>
+              <div style={{ fontSize: px(12), color: '#9ca3af', marginTop: px(2) }}>
+                {role === 'TEACHER' ? '教师账号' : '学生账号'}
+              </div>
+            </div>
+            {DOCK_MENU_ITEMS.map(({ key, label, Icon, danger }) => (
+              <button
+                key={key}
+                onClick={() => handleMenuAction(key)}
+                title={label}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: px(10),
+                  padding: `${px(10)}px ${px(10)}px`,
+                  marginTop: px(2),
+                  border: 'none',
+                  borderRadius: px(8),
+                  background: 'transparent',
+                  color: danger ? '#f87171' : '#e5e7eb',
+                  fontSize: px(15),
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  outline: 'none',
+                  transition: 'background .12s ease',
+                }}
+                onMouseEnter={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = danger
+                    ? 'rgba(248,113,113,0.14)'
+                    : 'rgba(255,255,255,0.08)';
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
+                }}
+              >
+                <Icon size={px(17)} />
+                <span style={{ flex: 1 }}>{label}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* 关于(菜单 → 关于):应用名称 + 版本信息 */}
+      {aboutOpen && (
+        <div
+          data-interactive
+          data-overlay-anim
+          style={{
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: px(360),
+            maxWidth: 'calc(100vw - 32px)',
+            background: '#ffffff',
+            borderRadius: px(16),
+            border: '1px solid #e5e7eb',
+            padding: px(22),
+            zIndex: 122,
+            boxShadow: '0 16px 48px rgba(0,0,0,0.25)',
+            pointerEvents: 'auto',
+            ...overlayIn('fade'),
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: px(10) }}>
+            <div style={{ fontSize: px(18), fontWeight: 600, color: '#1f2937' }}>关于</div>
+            <button
+              onClick={() => setAboutOpen(false)}
+              title="关闭"
+              style={{
+                width: px(34),
+                height: px(34),
+                borderRadius: px(8),
+                border: 'none',
+                background: 'transparent',
+                color: '#6b7280',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                outline: 'none',
+              }}
+            >
+              <X size={px(20)} />
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: px(4) }}>
+            <div
+              style={{
+                width: px(64),
+                height: px(64),
+                borderRadius: px(18),
+                background: 'linear-gradient(180deg, #3b82f6 0%, #2563eb 100%)',
+                color: '#ffffff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 8px 20px rgba(37,99,235,0.35)',
+              }}
+            >
+              <Info size={px(32)} />
+            </div>
+            <div style={{ fontSize: px(20), fontWeight: 600, color: '#1f2937', marginTop: px(8) }}>C30 教师端</div>
+            <div style={{ fontSize: px(13), color: '#9ca3af' }}>版本 {appVersion || '—'}</div>
+            <div
+              style={{
+                fontSize: px(13),
+                color: '#6b7280',
+                textAlign: 'center',
+                lineHeight: 1.6,
+                marginTop: px(8),
+                maxWidth: px(280),
+              }}
+            >
+              局域网互动教学系统 · 教师端
+              <br />
+              白板批注 / 桌面标注 / 聚焦 / 课堂互动
+            </div>
+            <div style={{ fontSize: px(12), color: '#c0c4cc', marginTop: px(14) }}>© 2026 C30</div>
+          </div>
+        </div>
+      )}
+
+      {/* 退出确认(菜单 → 退出):确认后真正退出应用,而不是最小化到托盘 */}
+      {quitConfirmOpen && (
+        <div
+          data-interactive
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 130,
+            pointerEvents: 'auto',
+          }}
+          onClick={() => setQuitConfirmOpen(false)}
+        >
+          <div
+            style={{
+              width: px(380),
+              maxWidth: 'calc(100vw - 32px)',
+              background: '#ffffff',
+              borderRadius: px(14),
+              padding: px(24),
+              boxShadow: '0 16px 48px rgba(0,0,0,0.35)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: px(17), fontWeight: 600, color: '#1f2937' }}>退出 C30 教师端?</div>
+            <p style={{ fontSize: px(14), color: '#7c8494', margin: `${px(10)}px 0 ${px(22)}px` }}>
+              退出后本次课堂结束,学生端会断开连接。
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: px(10) }}>
+              <button
+                onClick={() => setQuitConfirmOpen(false)}
+                style={{
+                  padding: `${px(9)}px ${px(18)}px`,
+                  border: '1px solid #e5e7eb',
+                  borderRadius: px(8),
+                  background: '#ffffff',
+                  color: '#4b5563',
+                  fontSize: px(14),
+                  cursor: 'pointer',
+                  outline: 'none',
+                }}
+              >
+                取消
+              </button>
+              <button
+                onClick={quitApp}
+                style={{
+                  padding: `${px(9)}px ${px(18)}px`,
+                  border: 'none',
+                  borderRadius: px(8),
+                  background: '#dc2626',
+                  color: '#ffffff',
+                  fontSize: px(14),
+                  cursor: 'pointer',
+                  outline: 'none',
+                }}
+              >
+                退出
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 系统设置窗口(菜单 → 设置):开机自启 / 展示教室信息 / 允许互动 */}
+      {/* 注意:面板必须在侧边栏容器之外渲染,否则侧边栏的 transform 会使 fixed 定位失效 */}
+      {settingsOpen && (
         <div
           data-interactive
           data-overlay-anim
@@ -415,7 +918,7 @@ export default function FloatingDock({
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: px(4) }}>
             <div style={{ fontSize: px(18), fontWeight: 600, color: '#1f2937' }}>系统设置</div>
             <button
-              onClick={() => setMenuOpen(false)}
+              onClick={() => setSettingsOpen(false)}
               title="关闭"
               style={{
                 width: px(34),
@@ -435,7 +938,7 @@ export default function FloatingDock({
             </button>
           </div>
           <div style={{ fontSize: px(13), color: '#9ca3af', marginBottom: px(16) }}>
-            {user.name} · {role === 'TEACHER' ? '发送端' : '接收端'} · {memberCount} 人在线
+            {user.name} · {role === 'TEACHER' ? '发送端' : '接收端'} · {memberCount} 名学生在线上
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: px(2) }}>
@@ -458,7 +961,7 @@ export default function FloatingDock({
             {/* 允许互动 */}
             <SettingRow
               label="允许互动"
-              desc="关闭后底部「互动」按钮置灰"
+              desc="关闭后教师端互动置灰,学生端隐藏互动入口"
               checked={settings.allowInteraction}
               onChange={(v) => onSettingsChange({ allowInteraction: v })}
               scale={s}
@@ -467,7 +970,11 @@ export default function FloatingDock({
 
           {role === 'TEACHER' && (
             <button
-              onClick={onLogout}
+              // 设置面板里的「退出」也走同一套确认 + 真正退出应用
+              onClick={() => {
+                setSettingsOpen(false);
+                setQuitConfirmOpen(true);
+              }}
               style={{
                 width: '100%',
                 padding: `${px(11)}px 0`,
@@ -487,35 +994,42 @@ export default function FloatingDock({
         </div>
       )}
 
-      {/* 窗口面板(「窗口」导航项点击打开):顶部「回到电脑桌面」+ 系统窗口列表(代替任务栏) */}
+      {/* 窗口面板(「窗口」导航项点击打开):和侧边栏/菜单/画笔面板同一套深色浮层语言。
+          内容:顶部「回到电脑桌面」+ 任务栏级窗口列表(系统任务栏里有的窗口才列出来) */}
       {windowsOpen && (
         <div
+          ref={winPanelRef}
           data-interactive
           data-overlay-anim
           style={{
             position: 'fixed',
-            top: '50%',
-            // 显示在侧边栏的对侧,避免与侧边栏重叠或超出屏幕;两侧都收起时按右侧算
-            [openSide === 'left' ? 'right' : 'left']: px(24),
-            transform: 'translateY(-50%)',
+            // 位置由上面的 useLayoutEffect 按侧边栏矩形算出来:紧贴侧边栏、顶端对齐
+            left: winPanelPos?.left ?? px(12),
+            top: winPanelPos?.top ?? px(12),
+            // 第一帧还没量到位置时先隐藏,避免闪到错误位置
+            visibility: winPanelPos ? 'visible' : 'hidden',
             width: px(380),
             maxWidth: 'calc(100vw - 32px)',
-            background: '#ffffff',
+            maxHeight: 'calc(100vh - 24px)',
+            // 深色浮层:与菜单浮层(#26262b)/ 侧边栏(rgba(27,27,31,.92))/ 画笔面板一致
+            background: 'rgba(27,27,31,0.96)',
+            border: '1px solid #3a3a40',
             borderRadius: px(16),
             padding: px(16),
             zIndex: 82,
-            boxShadow: '0 16px 48px rgba(0,0,0,0.28)',
+            boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
             display: 'flex',
             flexDirection: 'column',
             gap: px(10),
             pointerEvents: 'auto',
-            // 面板贴在屏幕哪一侧,就从哪一侧滑入
-            ...overlayIn(openSide === 'left' ? 'right' : 'left'),
+            // 面板从侧边栏那一侧「长出来」:左栏的面板贴左栏右侧(从左边滑入),
+            // 右栏的面板贴右栏左侧(从右边滑入)
+            ...overlayIn(openSide === 'left' ? 'left' : 'right'),
           }}
         >
           {/* 标题栏 + 关闭叉号 */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: px(16), fontWeight: 600, color: '#1f2937' }}>窗口</span>
+            <span style={{ fontSize: px(16), fontWeight: 600, color: '#ffffff' }}>窗口</span>
             <button
               onClick={() => setWindowsOpen(false)}
               title="关闭"
@@ -525,12 +1039,20 @@ export default function FloatingDock({
                 borderRadius: px(8),
                 border: 'none',
                 background: 'transparent',
-                color: '#6b7280',
+                color: '#9ca3af',
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 outline: 'none',
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = '#ffffff';
+                (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.10)';
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af';
+                (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
               }}
             >
               <X size={px(18)} />
@@ -549,14 +1071,21 @@ export default function FloatingDock({
               gap: px(10),
               width: '100%',
               padding: `${px(11)}px ${px(12)}px`,
-              border: 'none',
+              border: '1px solid rgba(255,255,255,0.06)',
               borderRadius: px(10),
-              background: '#eaf1fb',
-              color: '#1f2937',
+              background: 'rgba(255,255,255,0.07)',
+              color: '#e5e7eb',
               fontSize: px(15),
               fontWeight: 500,
               cursor: 'pointer',
               textAlign: 'left',
+              transition: 'background .12s ease',
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'rgba(37,99,235,0.24)';
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.07)';
             }}
           >
             <span
@@ -579,7 +1108,7 @@ export default function FloatingDock({
 
           {/* 窗口列表标题 + 刷新 */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: px(13), color: '#6b7280', fontWeight: 500 }}>已打开的窗口</span>
+            <span style={{ fontSize: px(13), color: '#9ca3af', fontWeight: 500 }}>已打开的窗口</span>
             <button
               onClick={refreshWindows}
               title="刷新窗口列表"
@@ -595,21 +1124,30 @@ export default function FloatingDock({
                 padding: px(4),
                 outline: 'none',
               }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = '#ffffff';
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = '#9ca3af';
+              }}
             >
               <RefreshCw size={px(14)} style={{ animation: winLoading ? 'spin 1s linear infinite' : 'none' }} />
               刷新
             </button>
           </div>
 
-          {/* 系统窗口列表(缩略图 + 标题,点击提到前台) */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: px(6), maxHeight: px(320), overflow: 'auto' }}>
+          {/* 任务栏级窗口列表(缩略图 + 标题):点哪一项就把哪个窗口最大化到桌面 */}
+          <div
+            className="c30-dark-scroll"
+            style={{ display: 'flex', flexDirection: 'column', gap: px(6), maxHeight: px(320), overflow: 'auto' }}
+          >
             {winLoading && winList.length === 0 && (
-              <div style={{ padding: `${px(20)}px 0`, textAlign: 'center', fontSize: px(13), color: '#9ca3af' }}>
+              <div style={{ padding: `${px(20)}px 0`, textAlign: 'center', fontSize: px(13), color: '#6b7280' }}>
                 正在读取窗口…
               </div>
             )}
             {!winLoading && winList.length === 0 && (
-              <div style={{ padding: `${px(20)}px 0`, textAlign: 'center', fontSize: px(13), color: '#9ca3af' }}>
+              <div style={{ padding: `${px(20)}px 0`, textAlign: 'center', fontSize: px(13), color: '#6b7280' }}>
                 未检测到其他应用窗口
               </div>
             )}
@@ -617,12 +1155,12 @@ export default function FloatingDock({
               <button
                 key={w.id}
                 onClick={() => {
-                  // 聚焦单窗口:最小化其他窗口,只保留该窗口在桌面展示
-                  (window as any).api?.windows?.focus?.(w.hwnd);
-                  // 聚焦后收起面板,让教师直接查看目标窗口
+                  // 点开就最大化:只把这个窗口还原+最大化+置前,其他窗口保持原样
+                  (window as any).api?.windows?.maximize?.(w.hwnd);
+                  // 收起面板,让老师直接看到目标窗口
                   setWindowsOpen(false);
                 }}
-                title={`只显示「${w.title}」,其余最小化`}
+                title={`最大化「${w.title}」`}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -637,7 +1175,7 @@ export default function FloatingDock({
                   transition: 'background .12s ease',
                 }}
                 onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.background = '#f3f4f6';
+                  (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.09)';
                 }}
                 onMouseLeave={(e) => {
                   (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
@@ -653,9 +1191,9 @@ export default function FloatingDock({
                       height: px(48),
                       borderRadius: px(6),
                       objectFit: 'cover',
-                      background: '#e5e7eb',
+                      background: '#3a3a40',
                       flexShrink: 0,
-                      border: '1px solid #e5e7eb',
+                      border: '1px solid #4b4b52',
                     }}
                   />
                 ) : (
@@ -664,7 +1202,8 @@ export default function FloatingDock({
                       width: px(78),
                       height: px(48),
                       borderRadius: px(6),
-                      background: '#e5e7eb',
+                      background: '#3a3a40',
+                      border: '1px solid #4b4b52',
                       flexShrink: 0,
                       display: 'flex',
                       alignItems: 'center',
@@ -678,7 +1217,7 @@ export default function FloatingDock({
                 <span
                   style={{
                     fontSize: px(14),
-                    color: '#1f2937',
+                    color: '#e5e7eb',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
@@ -687,9 +1226,6 @@ export default function FloatingDock({
                 >
                   {w.title}
                 </span>
-                {w.minimized && (
-                  <span style={{ fontSize: px(12), color: '#9ca3af', flexShrink: 0 }}>已最小化</span>
-                )}
               </button>
             ))}
           </div>
@@ -927,6 +1463,9 @@ export function BottomToolbar({
   onRedo,
   onClear,
   allowInteraction = true,
+  members,
+  studentCount,
+  interact,
 }: {
   activeTool: string;
   onToolChange: (key: string) => void;
@@ -939,14 +1478,19 @@ export function BottomToolbar({
   onClear: () => void;
   // 是否允许互动(设置项关闭时,互动按钮置灰并弹提示)
   allowInteraction?: boolean;
+  // 课堂成员(互动面板里显示学生名字)
+  members: SessionMember[];
+  studentCount: number;
+  // 课堂互动控制器(状态来自服务端快照)
+  interact: InteractController;
 }) {
   const s = useOverlayScale();
   const px = (n: number) => scaled(n, s);
 
   const [x, setX] = useState<number | null>(null);
   const [collapsed, setCollapsed] = useState(false);
-  // 当前展开的调整菜单(画笔/板擦);null = 未展开
-  const [openMenu, setOpenMenu] = useState<'pen' | 'eraser' | null>(null);
+  // 当前展开的浮层(画笔/板擦/互动);null = 未展开
+  const [openMenu, setOpenMenu] = useState<'pen' | 'eraser' | 'interact' | null>(null);
   // 互动被禁时的 toast
   const [toast, setToast] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -957,6 +1501,9 @@ export function BottomToolbar({
   const [pickerPos, setPickerPos] = useState<{ left: number; bottom: number } | null>(null);
 
   const isDrawingTool = activeTool === 'pen' || activeTool === 'eraser';
+  // 互动按钮上的角标:有人举手 → 红点数字;有互动在跑 → 绿点常亮
+  const handsCount = interact.state?.hands.length ?? 0;
+  const activeSession = !!interact.state?.session && interact.state.session.endedAt == null;
 
   // 左右拖动:工具条上**任意位置**都能拖(同样不需要手柄),拖动结束后吞掉一次 click
   const barDrag = useDragAnywhere('x', (p) => {
@@ -971,9 +1518,10 @@ export function BottomToolbar({
     return () => clearTimeout(t);
   }, [toast]);
 
-  // 工具被外部切换(进白板默认画笔 / 退出白板复位选择 / 点完成)时,关掉已不匹配的菜单
+  // 工具被外部切换(进白板默认画笔 / 退出白板复位选择 / 点完成)时,关掉已不匹配的菜单。
+  // 「互动」面板不绑定绘制工具,切画笔时保持打开(方便一边看结果一边批注)。
   useEffect(() => {
-    if (openMenu && openMenu !== activeTool) setOpenMenu(null);
+    if (openMenu && openMenu !== 'interact' && openMenu !== activeTool) setOpenMenu(null);
   }, [activeTool, openMenu]);
 
   // 收起工具条时同时收起菜单与颜色盘
@@ -989,6 +1537,11 @@ export function BottomToolbar({
     if (openMenu !== 'pen') setPickerOpen(false);
   }, [openMenu]);
 
+  // 「允许互动」被关掉时,互动面板没有存在意义,直接收起
+  useEffect(() => {
+    if (!allowInteraction && openMenu === 'interact') setOpenMenu(null);
+  }, [allowInteraction, openMenu]);
+
   // 计算菜单位置:水平居中对齐工具条并夹在屏幕内;垂直贴在工具条(含操作条)上方。
   // 颜色盘是**独立浮层**,贴在画笔面板右侧(右边放不下就挪到左侧),与面板底边对齐;
   // 这样取色时画笔面板高度不变,不会出现上下抖动。
@@ -1002,7 +1555,7 @@ export function BottomToolbar({
       const el = wrapRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      const menuWidth = scaled(openMenu === 'pen' ? 400 : 360, s);
+      const menuWidth = scaled(openMenu === 'pen' ? 400 : openMenu === 'interact' ? 620 : 360, s);
       const maxLeft = Math.max(8, window.innerWidth - menuWidth - 8);
       const left = Math.min(maxLeft, Math.max(8, rect.left + rect.width / 2 - menuWidth / 2));
       const bottom = Math.max(8, window.innerHeight - rect.top + scaled(10, s));
@@ -1024,6 +1577,11 @@ export function BottomToolbar({
   const handleToolClick = (tool: ToolItem) => {
     if (tool.key === 'interact' && !allowInteraction) {
       setToast('互动功能已被关闭');
+      return;
+    }
+    // 「互动」是面板而非绘制工具:点一下展开/收起,不打断当前画笔
+    if (tool.key === 'interact') {
+      setOpenMenu((prev) => (prev === 'interact' ? null : 'interact'));
       return;
     }
     if (tool.menu) {
@@ -1156,6 +1714,8 @@ export function BottomToolbar({
         >
           {TOOLBAR.map((t) => {
             const disabled = t.key === 'interact' && !allowInteraction;
+            // 「互动」是面板:展开时用蓝底描边区分,不和「当前画笔」的实心选中态抢视觉
+            const panelOpen = t.key === 'interact' && openMenu === 'interact';
             const isActive = activeTool === t.key && !disabled;
             const menuOpenHere = openMenu != null && openMenu === t.menu;
             const Icon = t.Icon;
@@ -1166,11 +1726,13 @@ export function BottomToolbar({
                 title={
                   disabled
                     ? '互动功能已被关闭'
-                    : t.menu
-                      ? `${t.label}(再点一次调整)`
-                      : t.label
+                    : t.key === 'interact'
+                      ? '课堂互动(点击展开/收起)'
+                      : t.menu
+                        ? `${t.label}(再点一次调整)`
+                        : t.label
                 }
-                aria-pressed={isActive}
+                aria-pressed={isActive || panelOpen}
                 style={{
                   position: 'relative',
                   width: px(60),
@@ -1183,59 +1745,107 @@ export function BottomToolbar({
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: px(3),
-                  // 选中态:实心蓝底 + 白字 + 外发光(和侧边栏导航保持同一套视觉语言)
+                  // 选中态:实心蓝底 + 白字 + 外发光(和侧边栏导航保持同一套视觉语言);
+                  // 互动面板展开:半透明蓝底 + 蓝色内描边,表示「面板开着」而不是「当前工具」
                   background: disabled
                     ? 'transparent'
                     : isActive
                       ? 'linear-gradient(180deg, #3b82f6 0%, #2563eb 100%)'
-                      : 'transparent',
-                  color: disabled ? '#4b5563' : isActive ? '#ffffff' : '#9ca3af',
-                  boxShadow: isActive ? '0 0 0 2px rgba(96,165,250,0.28), 0 6px 18px rgba(37,99,235,0.45)' : 'none',
+                      : panelOpen
+                        ? 'rgba(37,99,235,0.26)'
+                        : 'transparent',
+                  color: disabled ? '#4b5563' : isActive || panelOpen ? '#ffffff' : '#9ca3af',
+                  boxShadow: isActive
+                    ? '0 0 0 2px rgba(96,165,250,0.28), 0 6px 18px rgba(37,99,235,0.45)'
+                    : panelOpen
+                      ? 'inset 0 0 0 2px rgba(96,165,250,0.85)'
+                      : 'none',
                   opacity: disabled ? 0.5 : 1,
                   transition: 'all .15s ease',
                   outline: 'none',
                   padding: 0,
                 }}
                 onMouseEnter={(e) => {
-                  if (!isActive && !disabled)
+                  if (!isActive && !panelOpen && !disabled)
                     (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.08)';
                 }}
                 onMouseLeave={(e) => {
-                  if (!isActive && !disabled)
+                  if (!isActive && !panelOpen && !disabled)
                     (e.currentTarget as HTMLButtonElement).style.background = 'transparent';
                 }}
               >
                 <Icon size={px(24)} />
-                <span style={{ fontSize: px(12), lineHeight: 1, fontWeight: isActive ? 600 : 400 }}>{t.label}</span>
+                <span style={{ fontSize: px(12), lineHeight: 1, fontWeight: isActive || panelOpen ? 600 : 400 }}>{t.label}</span>
 
-                {/* 「有更多菜单」角标:未展开朝上、展开后朝下 */}
-                {t.menu && !disabled && (
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: px(3),
-                      right: px(3),
-                      width: px(15),
-                      height: px(15),
-                      borderRadius: '50%',
-                      background: menuOpenHere || isActive ? '#ffffff' : 'rgba(255,255,255,0.16)',
-                      color: menuOpenHere || isActive ? '#2563eb' : '#cbd5e1',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      pointerEvents: 'none',
-                      transition: 'all .15s ease',
-                    }}
-                  >
-                    <ChevronUp
-                      size={px(11)}
-                      style={{
-                        transform: menuOpenHere ? 'rotate(180deg)' : 'none',
-                        transition: 'transform .15s ease',
-                      }}
-                    />
-                  </span>
-                )}
+                {/* 角标:画笔/板擦 = 「还有调整菜单」;互动 = 举手人数 / 进行中绿点 */}
+                {t.key === 'interact'
+                  ? !disabled &&
+                    (handsCount > 0 ? (
+                      <span
+                        style={{
+                          position: 'absolute',
+                          top: px(2),
+                          right: px(2),
+                          minWidth: px(17),
+                          height: px(17),
+                          padding: `0 ${px(4)}px`,
+                          borderRadius: px(9),
+                          background: '#e5484d',
+                          color: '#fff',
+                          fontSize: px(11),
+                          fontWeight: 700,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          pointerEvents: 'none',
+                          boxShadow: panelOpen ? '0 0 0 2px rgba(255,255,255,0.55)' : 'none',
+                        }}
+                      >
+                        {handsCount}
+                      </span>
+                    ) : activeSession ? (
+                      <span
+                        style={{
+                          position: 'absolute',
+                          top: px(8),
+                          right: px(8),
+                          width: px(8),
+                          height: px(8),
+                          borderRadius: '50%',
+                          background: '#34d399',
+                          boxShadow: '0 0 0 2px rgba(52,211,153,0.25)',
+                          pointerEvents: 'none',
+                        }}
+                      />
+                    ) : null)
+                  : t.menu &&
+                    !disabled && (
+                      <span
+                        style={{
+                          position: 'absolute',
+                          top: px(3),
+                          right: px(3),
+                          width: px(15),
+                          height: px(15),
+                          borderRadius: '50%',
+                          background: menuOpenHere || isActive ? '#ffffff' : 'rgba(255,255,255,0.16)',
+                          color: menuOpenHere || isActive ? '#2563eb' : '#cbd5e1',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          pointerEvents: 'none',
+                          transition: 'all .15s ease',
+                        }}
+                      >
+                        <ChevronUp
+                          size={px(11)}
+                          style={{
+                            transform: menuOpenHere ? 'rotate(180deg)' : 'none',
+                            transition: 'transform .15s ease',
+                          }}
+                        />
+                      </span>
+                    )}
               </button>
             );
           })}
@@ -1287,7 +1897,8 @@ export function BottomToolbar({
             pointerEvents: 'auto',
             // 小屏/低分辨率下菜单可能比可视区还高:限高 + 内部滚动,避免顶出屏幕
             maxHeight: `calc(100vh - ${menuPos.bottom + 12}px)`,
-            overflowY: 'auto',
+            // 互动面板自己管内部滚动(标题栏 + 结果区),外层不再套一层滚动条
+            overflowY: openMenu === 'interact' ? 'visible' : 'auto',
             ...overlayIn('up', 160),
           }}
         >
@@ -1298,8 +1909,15 @@ export function BottomToolbar({
               pickerOpen={pickerOpen}
               onTogglePicker={() => setPickerOpen((v) => !v)}
             />
-          ) : (
+          ) : openMenu === 'eraser' ? (
             <EraserPanel radius={eraserRadius} onChange={onEraserRadiusChange} />
+          ) : (
+            <InteractPanel
+              interact={interact}
+              members={members}
+              studentCount={studentCount}
+              onClose={() => setOpenMenu(null)}
+            />
           )}
         </div>
       )}

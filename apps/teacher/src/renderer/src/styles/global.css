@@ -30,6 +30,26 @@ body {
   }
 }
 
+/* 深色浮层里的滚动条(窗口面板的窗口列表等):别让系统默认的浅色滚动条破坏深色面板 */
+.c30-dark-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #4b4b52 transparent;
+}
+.c30-dark-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.c30-dark-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.c30-dark-scroll::-webkit-scrollbar-thumb {
+  background: #4b4b52;
+  border-radius: 4px;
+}
+.c30-dark-scroll::-webkit-scrollbar-thumb:hover {
+  background: #5f5f68;
+}
+
 /* ---- 浮层入场动画 ----
  * 浮层从屏幕外沿「朝屏幕里」的方向滑入 + 淡入:
  *   · 贴右侧 → 从右边滑入(overlay-in-left:起点在 +X)

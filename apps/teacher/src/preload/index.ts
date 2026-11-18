@@ -64,6 +64,10 @@ const api = {
     // 白板全屏:true 提升层级盖住任务栏(全白),false 降回普通悬浮层级
     setFullscreen: (fullscreen: boolean) => ipcRenderer.send('whiteboard:set-fullscreen', fullscreen),
   },
+  screen: {
+    // 屏幕共享期间给悬浮层开启内容保护:采集里排除侧边栏/工具栏,避免和笔迹重影
+    protect: (on: boolean) => ipcRenderer.send('screen:protect', on),
+  },
   spotlight: {
     // 截取屏幕指定区域(逻辑坐标)→ 返回 PNG dataURL
     // 调用前渲染层需先卸载聚焦层/隐藏装饰(主进程不会再隐藏或移动窗口)
@@ -79,15 +83,18 @@ const api = {
     list: (): Promise<
       { id: string; hwnd: number; title: string; thumbnail: string; minimized?: boolean }[]
     > => ipcRenderer.invoke('windows:list'),
-    // 把指定窗口提到前台
-    activate: (hwnd: number): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('windows:activate', hwnd),
-    // 聚焦单窗口:最小化其他窗口,只保留目标窗口
-    focus: (hwnd: number): Promise<{ ok: boolean; minimized: number }> =>
-      ipcRenderer.invoke('windows:focus', hwnd),
-    // 回到桌面:最小化所有窗口
+    // 点开某个窗口:还原(若最小化)+ 最大化 + 提到前台,其余窗口不动
+    maximize: (hwnd: number): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('windows:maximize', hwnd),
+    // 回到桌面:最小化所有窗口,只留桌面
     showDesktop: (): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('windows:showDesktop'),
+  },
+  app: {
+    // 应用版本(侧边栏「菜单 → 关于」展示)
+    version: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
+    // 退出应用(侧边栏「菜单 → 退出」):真正退出,而不是关闭窗口最小化到托盘
+    quit: () => ipcRenderer.send('app:quit'),
   },
   settings: {
     // 读取教师端本地设置(开机自启/展示教室信息/允许互动)
