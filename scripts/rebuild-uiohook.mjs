@@ -15,6 +15,9 @@
 //
 // postinstall 里用 --if-needed:全新安装时会编译一次,之后重复 install 秒过;
 // 若本机没有 VS2017/Node20,只告警不阻断安装(运行时还有主进程安全阀兜底,见 docs/retro-mouse-freeze-2026-11-18.md)。
+//
+// 输出约定:本脚本在 dev/CI 终端与 postinstall 里跑,日志一律用 ASCII 英文。
+// (Windows 中文控制台是 GBK/936,UTF-8 中文输出会变成乱码;ASCII 在任何代码页下都正常。)
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
@@ -39,8 +42,14 @@ function log(msg) {
   console.log(`[rebuild:uiohook] ${msg}`);
 }
 
+// 本地时间、纯 ASCII 格式(避免依赖 locale)
+function fmtLocalTime(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function die(msg) {
-  console.error(`\n  ❌ ${msg}\n`);
+  console.error(`\n  [FAIL] ${msg}\n`);
   process.exit(1);
 }
 
@@ -50,18 +59,19 @@ function die(msg) {
  */
 function skip(msg, hints = []) {
   if (STRICT) die(msg);
-  console.warn(`\n  ⚠️  ${msg}`);
-  for (const h of hints) console.warn(`     ${h}`);
-  console.warn('     已跳过原生编译(不会阻断 pnpm install)。运行时若检测到产物不匹配,');
-  console.warn('     「吞 mousedown」会被自动禁用 —— 不会冻结鼠标,但桌面可能被误框选。');
-  console.warn('     需要完整能力时请在本机补齐工具链后运行:pnpm rebuild:uiohook\n');
+  console.warn(`\n  [warn] ${msg}`);
+  for (const h of hints) console.warn(`         ${h}`);
+  console.warn('         native build skipped (pnpm install is not blocked). At runtime, if the');
+  console.warn('         artifact mismatches, mousedown swallowing is disabled automatically -');
+  console.warn('         the cursor will not freeze, but the desktop may be rubber-band selected.');
+  console.warn('         To get the full capability, fix the toolchain and run: pnpm rebuild:uiohook\n');
   process.exit(0);
 }
 
 // ---- 0. 平台 -------------------------------------------------------------------------
 if (process.platform !== 'win32') {
   // 这套补丁的消费语义只在 Windows 下有实际意义;其它平台沿用官方 prebuild 即可
-  log(`当前平台 ${process.platform},跳过原生编译。`);
+  log(`platform ${process.platform}: native build not needed, skipping.`);
   process.exit(0);
 }
 
@@ -110,16 +120,16 @@ function findPatchedDir() {
   }
   if (!existsSync(join(resolved, 'package.json'))) return null;
   if (!resolved.includes('_patch_hash')) {
-    log(`⚠️  目录不带 patch_hash(${resolved})`);
-    log('    补丁可能没生效,请先 pnpm install(确认 package.json 的 pnpm.patchedDependencies)');
+    log(`[warn] directory has no patch_hash (${resolved})`);
+    log('       the patch may not be applied; run pnpm install first (check pnpm.patchedDependencies)');
   }
   return resolved;
 }
 
 const dir = findPatchedDir();
 if (!dir) {
-  skip('没找到 apps/teacher/node_modules/uiohook-napi(依赖还没装好?)', [
-    '请先执行 pnpm install',
+  skip('apps/teacher/node_modules/uiohook-napi not found (dependencies installed?)', [
+    'run pnpm install first',
   ]);
 }
 
@@ -150,40 +160,40 @@ function isUpToDate() {
 const node20 = findNode20();
 
 if (IF_NEEDED && isUpToDate()) {
-  log('产物已是最新(比补丁源码新),跳过编译。');
+  log('artifact is up to date (newer than patched sources), skipping build.');
   if (!verify(node20 ?? process.execPath)) {
-    skip('产物自检未通过(consume-mode 不是 2 或模块无法加载)。', [
-      '请运行 pnpm rebuild:uiohook 重新编译。',
+    skip('artifact self-check failed (consume-mode != 2 or module cannot load).', [
+      'run pnpm rebuild:uiohook to rebuild.',
     ]);
   }
-  log('完成 ✅');
+  log('done');
   process.exit(0);
 }
 
 // ---- 6. 工具链检查 -------------------------------------------------------------------
 if (!node20) {
-  skip('没找到 Node 20(编译必须用 Node20:Electron 33 内嵌 Node 20.18)。', [
-    '安装:volta install node@20',
-    '或用 UIOHOOK_NODE20=/path/to/node20 指定。',
+  skip('Node 20 not found (build requires Node 20: Electron 33 embeds Node 20.18).', [
+    'install: volta install node@20',
+    'or set UIOHOOK_NODE20=/path/to/node20.',
   ]);
 }
 const nodeGyp = findNodeGyp();
 if (!nodeGyp) {
-  skip('没找到 node-gyp(npx 缓存里也没有)。', [
-    '在本仓库根目录执行一次:npx node-gyp --version(会缓存到 npx 目录)。',
+  skip('node-gyp not found (not in the npx cache either).', [
+    'run once in the repo root: npx node-gyp --version (it caches into the npx dir).',
   ]);
 }
 if (!existsSync(VS2017_VCVARS)) {
-  skip(`没找到 VS${MSVS} Build Tools:${VS2017_VCVARS}`, [
-    '安装 Visual Studio 2017 Build Tools(含 C++ 生成工具),',
-    '或用 --msvs-version=<版本> 指定已安装的版本。',
+  skip(`VS${MSVS} Build Tools not found: ${VS2017_VCVARS}`, [
+    'install Visual Studio 2017 Build Tools (with C++ build tools),',
+    'or pass --msvs-version=<installed version>.',
   ]);
 }
 
 // ---- 7. 编译 -------------------------------------------------------------------------
-log(`编译目录: ${dir}`);
-log(`Node 20 : ${node20}`);
-log('开始编译(首次约 1-3 分钟)…');
+log(`build dir: ${dir}`);
+log(`node 20 : ${node20}`);
+log('building (first run takes 1-3 min)...');
 
 const res = spawnSync(node20, [nodeGyp, 'rebuild', `--msvs_version=${MSVS}`, '--directory', dir], {
   stdio: 'inherit',
@@ -191,11 +201,11 @@ const res = spawnSync(node20, [nodeGyp, 'rebuild', `--msvs_version=${MSVS}`, '--
 
 if (res.error || res.status !== 0) {
   const hint = [
-    '最常见原因:教师端还在运行,占用了 build/Release/uiohook_napi.node。',
-    '请先退出教师端(pnpm dev 的窗口),再重跑 pnpm rebuild:uiohook。',
+    'most common cause: the teacher app is still running and holds build/Release/uiohook_napi.node.',
+    'quit the teacher app (pnpm dev window) and rerun pnpm rebuild:uiohook.',
   ];
   // skip():非严格模式告警后退出 0(安装流程不被环境问题阻断);严格模式直接非 0 退出
-  skip(`node-gyp 编译失败(exit=${res.status ?? 'null'})。`, hint);
+  skip(`node-gyp build failed (exit=${res.status ?? 'null'}).`, hint);
 }
 
 // ---- 8. 删除官方 prebuilds 的 win32 .node,确保 node-gyp-build 加载 build/Release --------
@@ -204,16 +214,16 @@ if (existsSync(prebuild)) {
   for (const f of readdirSync(prebuild)) {
     if (f.endsWith('.node')) {
       rmSync(join(prebuild, f), { force: true });
-      log(`已删除官方预编译产物:prebuilds/win32-x64/${f}`);
+      log(`removed official prebuild: prebuilds/win32-x64/${f}`);
     }
   }
 }
 
-if (!existsSync(BUILT)) die(`编译产物不存在:${BUILT}`);
+if (!existsSync(BUILT)) die(`build artifact missing: ${BUILT}`);
 const st = statSync(BUILT);
-log(`产物: ${st.size} bytes, ${st.mtime.toLocaleString('zh-CN')}`);
+log(`artifact: ${st.size} bytes, ${fmtLocalTime(st.mtime)}`);
 
 // ---- 9. 自检(consume-mode 必须 = 2) --------------------------------------------------
-log('运行自检…');
-if (!verify(node20)) die('自检未通过,请检查上面的输出。');
-log('完成 ✅');
+log('running self-check...');
+if (!verify(node20)) die('self-check failed; see the output above.');
+log('done');

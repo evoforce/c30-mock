@@ -10,8 +10,10 @@
 # 两端版本由 .changeset/config.json 的 fixed 组保证一致（@c30/teacher + @c30/student）。
 #
 # Release 附件：
-#   C30-Teacher-Setup-<version>-x64.exe  教师端安装包
-#   C30-Student-Setup-<version>-x64.exe  学生端安装包
+#   C30-Teacher-Setup-<version>-x64.exe    教师端安装包（x64）
+#   C30-Teacher-Setup-<version>-arm64.exe  教师端安装包（Windows on Arm）
+#   C30-Student-Setup-<version>-x64.exe    学生端安装包（x64）
+#   C30-Student-Setup-<version>-arm64.exe  学生端安装包（Windows on Arm）
 #   SHA256SUMS.txt                       安装包 SHA-256 校验和
 name: Build & Release Windows Installers
 
@@ -157,6 +159,13 @@ jobs:
       - name: Build student app
         run: pnpm --filter @c30/student build:win
 
+      # Windows on Arm（Surface / 骁龙本）：同一套界面，payload 换成 arm64 的 Electron
+      - name: Build teacher app (arm64)
+        run: pnpm --filter @c30/teacher build:win:arm64
+
+      - name: Build student app (arm64)
+        run: pnpm --filter @c30/student build:win:arm64
+
       # electron-builder 产出的文件名是中文 + 空格（如「C30教师端 Setup 0.2.0.exe」），
       # 作为下载链接/命令行参数容易出问题，这里统一改名为 ASCII 名称并生成校验和。
       - name: Prepare release assets
@@ -174,16 +183,15 @@ jobs:
 
           foreach ($app in $apps) {
             $version = (Get-Content (Join-Path $PWD "apps/$($app.Dir)/package.json") -Raw | ConvertFrom-Json).version
-            $installer = Get-ChildItem -Path (Join-Path $PWD "apps/$($app.Dir)/release") -Filter '*.exe' -File |
-              Where-Object { $_.Name -notmatch '(?i)uninstall' } |
-              Sort-Object Length -Descending |
-              Select-Object -First 1
-            if (-not $installer) { throw "未找到 $($app.Label) 安装包：apps/$($app.Dir)/release/*.exe" }
-
-            $assetName = "C30-$($app.Label)-Setup-$version-x64.exe"
-            Copy-Item -Path $installer.FullName -Destination (Join-Path $outDir $assetName) -Force
+            # 两个架构各一个安装包，文件名由 build-installer.mjs 固定为 ASCII
+            foreach ($arch in @('x64', 'arm64')) {
+              $src = Join-Path $PWD "apps/$($app.Dir)/release/C30-$($app.Label)-Setup-$version-$arch.exe"
+              if (-not (Test-Path $src)) { throw "未找到 $arch 安装包：$src" }
+              Copy-Item -Path $src -Destination (Join-Path $outDir "C30-$($app.Label)-Setup-$version-$arch.exe") -Force
+              $len = (Get-Item $src).Length
+              Write-Host ("· {0} -> {1} ({2:N1} MB)" -f (Split-Path -Leaf $src), "C30-$($app.Label)-Setup-$version-$arch.exe", ($len / 1MB))
+            }
             $versions[$app.Label] = $version
-            Write-Host ("· {0} -> {1} ({2:N1} MB)" -f $installer.Name, $assetName, ($installer.Length / 1MB))
           }
 
           # 校验和：用户下载后可自行核对，便于内网分发。

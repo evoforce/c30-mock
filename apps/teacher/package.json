@@ -9,10 +9,11 @@
     "predev": "node ../../scripts/verify-uiohook.mjs",
     "build": "electron-vite build",
     "prebuild": "node ../../scripts/verify-uiohook.mjs",
-    "build:win": "electron-vite build && electron-builder --win nsis",
+    "build:win": "electron-vite build && node ../../scripts/build-installer.mjs --app teacher --arch x64",
     "preview": "electron-vite preview",
     "lint": "tsc --noEmit",
-    "verify:uiohook": "node ../../scripts/verify-uiohook.mjs --strict"
+    "verify:uiohook": "node ../../scripts/verify-uiohook.mjs --strict",
+    "build:win:arm64": "electron-vite build && node ../../scripts/build-installer.mjs --app teacher --arch arm64"
   },
   "build": {
     "appId": "com.c30.teacher",
@@ -31,21 +32,7 @@
       "**/*.node"
     ],
     "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "C30教师端"
+      "icon": "build/icon.ico"
     }
   },
   "dependencies": {
