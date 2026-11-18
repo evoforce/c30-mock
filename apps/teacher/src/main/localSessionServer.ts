@@ -5,6 +5,7 @@
 // 但只做内存状态,不做 DB 持久化(中心服务器仍可用于云同步/回放)。
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { createServer as createHttpServer } from 'http';
+import { createServer as createNetServer } from 'net';
 import type {
   SessionMember,
   WhiteboardEvent,
@@ -66,7 +67,17 @@ export interface LocalSessionServer {
   getPort(): number;
 }
 
-export function createLocalSessionServer(): LocalSessionServer {
+export interface LocalSessionServerOptions {
+  /**
+   * 固定房间号(由机器码 + 网络信息派生,见 roomIdentity.ts)。
+   * 不传则退回随机生成 —— 仅用于兼容旧调用/测试。
+   */
+  roomCode?: string;
+  /** 首选监听端口:端口固定,学生端的 socket.io 才能在老师重启后重连回同一地址 */
+  preferredPort?: number;
+}
+
+export function createLocalSessionServer(options: LocalSessionServerOptions = {}): LocalSessionServer {
   let io: SocketIOServer | null = null;
   let httpServer: ReturnType<typeof createHttpServer> | null = null;
   let port = 0;
@@ -88,6 +99,21 @@ export function createLocalSessionServer(): LocalSessionServer {
     }
     if (rooms.has(code)) return genRoomCode();
     return code;
+  }
+
+  /** 首选端口可用就用它,被占用则顺延;全部占满时退回 0(交给 OS 分配) */
+  async function pickListenPort(preferred: number): Promise<number> {
+    for (let candidate = preferred; candidate < preferred + 20; candidate += 1) {
+      // 顺延范围不能压到系统动态端口段之外太远,这里 20 个足够覆盖偶发占用
+      const free = await new Promise<boolean>((resolve) => {
+        const probe = createNetServer();
+        probe.once('error', () => resolve(false));
+        probe.once('listening', () => probe.close(() => resolve(true)));
+        probe.listen(candidate, '0.0.0.0');
+      });
+      if (free) return candidate;
+    }
+    return 0;
   }
 
   // 教师成员常驻课堂。
@@ -290,7 +316,7 @@ export function createLocalSessionServer(): LocalSessionServer {
           io?.to(existingCode).emit('stage.state', stageStateOf(existingCode, room));
           return;
         }
-        const roomCode = genRoomCode();
+        const roomCode = options.roomCode || genRoomCode();
         client.join(roomCode);
         rooms.set(roomCode, {
           members: [],
@@ -763,9 +789,11 @@ export function createLocalSessionServer(): LocalSessionServer {
       });
     });
 
-    // 监听 0 号端口,由 OS 分配可用端口(绑定所有网卡,供局域网直连)
+    // 固定端口(默认 49355,被占用顺延):端口稳定 + 房间号稳定,学生端断线后
+    // socket.io 才能凭同一个 URL 重连回同一间课堂;随机端口会让「重连」变成空承诺。
+    const listenPort = await pickListenPort(options.preferredPort ?? 49355);
     await new Promise<void>((resolve) => {
-      httpServer!.listen(0, '0.0.0.0', () => {
+      httpServer!.listen(listenPort, '0.0.0.0', () => {
         const addr = httpServer!.address();
         port = typeof addr === 'object' && addr ? addr.port : 0;
         resolve();

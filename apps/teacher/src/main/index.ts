@@ -6,6 +6,7 @@ import { execFile } from 'child_process';
 import { networkInterfaces } from 'os';
 import { mdsd } from '@c30/mdsd';
 import { createLocalSessionServer, type LocalSessionServer } from './localSessionServer';
+import { deriveRoomCode } from './roomIdentity';
 import { uIOhook, UiohookMouseEvent } from 'uiohook-napi';
 
 let mainWindow: BrowserWindow | null = null;
@@ -986,12 +987,15 @@ function registerWindowControls(): void {
 
 // 教师端内嵌课堂服务器 + mDNS 广播(局域网直连方案)
 function registerLocalSessionServer(): void {
-  localServer = createLocalSessionServer();
+  const host = getLanIP();
+  // 房间号由「机器码 + 网络信息」派生(见 roomIdentity.ts):教师端重启/HMR 后不变,
+  // 学生端的断线重连才连得回同一间课堂;随机房间号会让重连变成空承诺。
+  const roomCode = deriveRoomCode(host);
+  localServer = createLocalSessionServer({ roomCode, preferredPort: 49355 });
   localServer
     .start()
     .then((port) => {
-      const host = getLanIP();
-      console.log(`[local-session] classroom server listening on ${host}:${port}`);
+      console.log(`[local-session] classroom server listening on ${host}:${port} (room ${roomCode})`);
       // 向 renderer 暴露端口(供连接提示)
       ipcMain.handle('session:local-endpoint', () => ({ host, port }));
     })
@@ -1004,7 +1008,9 @@ function registerLocalSessionServer(): void {
 ipcMain.handle('session:publish', async (_e, info: { roomCode: string; teacherName: string; host: string; port: number }) => {
   try {
     await mdsd.publish(info);
-    console.log(`[local-session] classroom published room=${info.roomCode} @ ${info.host}:${info.port}`);
+    console.log(
+      `[local-session] classroom published room=${info.roomCode} @ ${info.host}:${info.port} (mDNS via ${mdsd.getInterface() ?? 'auto'})`,
+    );
     return { ok: true };
   } catch (err) {
     console.warn('[local-session] mDNS publish failed:', (err as Error)?.message ?? String(err));
